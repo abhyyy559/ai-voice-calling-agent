@@ -129,6 +129,21 @@ The `domain-configs/` directory holds versioned JSON configs. The `backend/domai
 
 ---
 
+## Enterprise Platform Lanes Merged + Real-Key Local Stack (2026-08-24)
+- **Merged**: all enterprise-platform lanes (auth/tenancy, agents + immutable versions, in-browser playground, campaigns, dev tools) into `master`; frontend design language extended across auth/wizard/playground/dev-tools screens.
+- **Real-key local stack (no Docker) brought up**:
+  - LiveKit server binary vendored at `tools/livekit/livekit-server.exe`, running on :7880 with devkey credentials from root `.env`.
+  - FastAPI backend on :8000 against SQLite (`backend/voice_agent.db`), voice-agent worker registered with LiveKit (logs: `worker_out.log`), React app on :3000.
+  - New one-command launcher: `scripts/dev-local.ps1` (idempotent — skips anything already listening; polls `/api/health`; PS 5.1 compatible).
+- **Campaign-launch 422 fixed**: root cause was NOT a request/body mismatch — `POST /api/campaigns/{id}/launch` takes no body and the 422s were the endpoint's own guards firing after a post-midnight-IST test click (calling window is 09:00–21:00 IST). Frontend now pre-checks the IST window + empty roster, disables Launch with a plain-English banner, and translates server guard details to friendly messages. Contract pinned by new tests in `backend/tests/test_campaign_launch.py`.
+- **Docs**: beginner-friendly golden-path guide added at **`docs/USER_GUIDE.md`**.
+- **Known limitations**:
+  - Redis is absent locally → dialer queue features degraded (no distributed rate-limiting / queue backpressure).
+  - Twilio integration dormant pending owner go-signal (code present, credentials not wired for outbound).
+  - `OPENAI_API_KEY` is a placeholder in `.env` — Groq (`llama-3.3-70b-versatile`) is the LLM actually used.
+
+---
+
 **Log Format**: This file will be updated after each major conversation/milestone with:
 - Clear task completion status.
 - Technical decisions made.
@@ -136,4 +151,4 @@ The `domain-configs/` directory holds versioned JSON configs. The `backend/domai
 - Time estimates and progress tracking.
 - User actions required.
 
-**Last Updated**: 2026-08-23 by Claude Code.
+**Last Updated**: 2026-08-24 by Claude Code.
