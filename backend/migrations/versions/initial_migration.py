@@ -28,12 +28,12 @@ def upgrade() -> None:
         sa.Column("display_name", sa.String(length=200), nullable=False),
         sa.Column("config", sa.JSON(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -50,12 +50,12 @@ def upgrade() -> None:
         sa.Column("schedule_window_start", sa.DateTime(), nullable=True),
         sa.Column("schedule_window_end", sa.DateTime(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
         sa.ForeignKeyConstraint(["domain_config_id"], ["domain_configs.id"]),
@@ -77,12 +77,12 @@ def upgrade() -> None:
         sa.Column("next_attempt_at", sa.DateTime(), nullable=True),
         sa.Column("last_call_id", sa.Integer(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
         sa.ForeignKeyConstraint(["campaign_id"], ["campaigns.id"]),
@@ -112,12 +112,12 @@ def upgrade() -> None:
         sa.Column("cost", sa.JSON(), nullable=True),
         sa.Column("latency", sa.JSON(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
         sa.ForeignKeyConstraint(["campaign_id"], ["campaigns.id"]),
@@ -136,7 +136,7 @@ def upgrade() -> None:
         sa.Column("event_type", sa.String(length=100), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.ForeignKeyConstraint(["call_id"], ["calls.id"]),
         sa.PrimaryKeyConstraint("id"),
@@ -167,7 +167,7 @@ def upgrade() -> None:
         sa.Column("source_turn_index", sa.Integer(), nullable=True),
         sa.Column("confidence", sa.Float(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "created_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.ForeignKeyConstraint(["call_id"], ["calls.id"]),
         sa.PrimaryKeyConstraint("id"),
@@ -183,7 +183,7 @@ def upgrade() -> None:
         sa.Column("consent_given", sa.Boolean(), nullable=False),
         sa.Column("source", sa.String(length=200), nullable=True),
         sa.Column(
-            "captured_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True
+            "captured_at", sa.DateTime(), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=True
         ),
         sa.ForeignKeyConstraint(["contact_id"], ["contacts.id"]),
         sa.PrimaryKeyConstraint("id"),

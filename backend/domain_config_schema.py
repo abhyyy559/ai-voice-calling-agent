@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any, Literal, Union
 from pydantic import BaseModel, Field, field_validator
 from datetime import date
 
@@ -68,17 +68,7 @@ class DomainConfig(BaseModel):
     @classmethod
     def validate_step_order(cls, v: List[QuestionFlowStep]) -> List[QuestionFlowStep]:
         """Ensure steps are sequential starting from 1."""
-        if not v:
-            raise ValueError("question_flow must have at least one step")
-        expected_step = 1
-        for step in v:
-            if step.step != expected_step:
-                raise ValueError(
-                    f"question_flow steps must be sequential starting from 1. "
-                    f"Expected step {expected_step}, got {step.step}"
-                )
-            expected_step += 1
-        return v
+        return ensure_sequential_steps(v)
 
     @field_validator("extraction_schema")
     @classmethod
@@ -89,6 +79,54 @@ class DomainConfig(BaseModel):
         if missing:
             raise ValueError(f"Missing required extraction fields: {missing}")
         return v
+
+
+def ensure_sequential_steps(steps: List["QuestionFlowStep"]) -> List["QuestionFlowStep"]:
+    """Shared rule: flow steps must be numbered sequentially starting at 1."""
+    expected_step = 1
+    for step in steps:
+        if step.step != expected_step:
+            raise ValueError(
+                f"question_flow steps must be sequential starting from 1. "
+                f"Expected step {expected_step}, got {step.step}"
+            )
+        expected_step += 1
+    return steps
+
+
+class AgentVersionPayload(BaseModel):
+    """Request schema for ``POST /api/agents/{id}/versions``.
+
+    Reuses the structural rules of :class:`DomainConfig` (field schemas,
+    sequential flow steps, prompt/disclosure minimum lengths) without its
+    domain-specific required-fields rule — every call domain is valid here.
+    """
+    system_prompt: str = Field(..., min_length=10, description="System prompt for the LLM agent")
+    company_context: Dict[str, Any] = Field(default_factory=dict)
+    question_flow: List[QuestionFlowStep] = Field(
+        ..., min_length=1, description="Ordered list of questions to ask"
+    )
+    extraction_schema: Dict[str, ExtractionFieldSchema] = Field(
+        ..., description="Fields to extract from the conversation"
+    )
+    disclosure_script: str = Field(
+        ..., min_length=10, description="Mandatory AI disclosure script (FR-11)"
+    )
+    escalation_rules: List[Union[str, EscalationRule]] = Field(
+        ..., min_length=1, description="Conditions that trigger human escalation"
+    )
+    voice_settings: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("question_flow")
+    @classmethod
+    def validate_step_order(cls, v: List[QuestionFlowStep]) -> List[QuestionFlowStep]:
+        """Ensure steps are sequential starting from 1 (shared legacy rule)."""
+        return ensure_sequential_steps(v)
+
+
+def validate_agent_version_payload(payload: Dict[str, Any]) -> AgentVersionPayload:
+    """Validate an agent-version payload dictionary (raises pydantic ValidationError)."""
+    return AgentVersionPayload(**payload)
 
 
 def validate_domain_config(config: Dict[str, Any]) -> DomainConfig:
