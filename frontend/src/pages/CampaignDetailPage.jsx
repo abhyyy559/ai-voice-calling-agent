@@ -23,6 +23,28 @@ const CONTACT_STATUS_FILTERS = [
 const LAUNCHABLE = ['draft', 'created', 'paused'];
 const CANCELED_like = ['canceled', 'cancelled'];
 
+// Calling window enforced by POST /api/campaigns/{id}/launch (PRD §8):
+// 9 AM – 9 PM IST, start inclusive / end exclusive. Mirrored client-side so
+// users get told WHY launching is blocked instead of a bare 422 after clicking.
+const CALLING_HOURS_START = 9;
+const CALLING_HOURS_END = 21;
+
+function istNow() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (type) => Number(parts.find((p) => p.type === type)?.value);
+  let hour = get('hour');
+  if (hour === 24) hour = 0;
+  return {
+    hour,
+    label: `${String(hour).padStart(2, '0')}:${String(get('minute')).padStart(2, '0')}`,
+  };
+}
+
 function fmtDateTime(value) {
   if (!value) return '—';
   const d = new Date(value);
@@ -48,6 +70,17 @@ function consentValue(v) {
   if (v === true || v === 'true' || v === 1 || v === '1') return true;
   if (v === false || v === 'false' || v === 0 || v === '0') return false;
   return null;
+}
+
+function friendlyActionError(e) {
+  const msg = e?.message || 'Action failed.';
+  if (msg.startsWith('outside calling hours')) {
+    return `Launch blocked: calls only run between 9 AM and 9 PM IST. ${msg} — try again once the window opens.`;
+  }
+  if (msg === 'campaign has no contacts to call') {
+    return 'This campaign has no contacts yet — upload a contact list on the Contacts tab, then launch.';
+  }
+  return msg;
 }
 
 export default function CampaignDetailPage() {
@@ -87,12 +120,29 @@ export default function CampaignDetailPage() {
       reloadCampaign();
       reloadDash();
     } catch (e) {
-      setActionError(e.message || 'Action failed.');
+      setActionError(friendlyActionError(e));
     } finally {
       setActionBusy(false);
       setShowCancelConfirm(false);
     }
   }
+
+  // ---- launch pre-checks (server stays the source of truth; this just
+  // explains the common rejections BEFORE the click instead of after) ----
+  const [istClock, setIstClock] = useState(istNow);
+  useEffect(() => {
+    const timer = setInterval(() => setIstClock(istNow()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  const contactTotal = campaign?.counts?.total;
+  const hasContacts = contactTotal == null ? true : contactTotal > 0;
+  const withinCallingHours =
+    istClock.hour >= CALLING_HOURS_START && istClock.hour < CALLING_HOURS_END;
+  const launchBlockedReason = !hasContacts
+    ? 'Upload contacts first — a campaign needs at least one contact before it can be launched.'
+    : !withinCallingHours
+      ? `Calls only run between 9 AM and 9 PM IST. It is currently ${istClock.label} IST, so launching is paused until the window opens.`
+      : null;
 
   // ---- contacts list ----
   const [contactsData, setContactsData] = useState(null);
@@ -412,7 +462,12 @@ export default function CampaignDetailPage() {
         </div>
         <div className="head-actions">
           {canLaunch && (
-            <button className="btn btn-primary" disabled={actionBusy} onClick={() => runAction(() => api.launchCampaign(id))}>
+            <button
+              className="btn btn-primary"
+              disabled={actionBusy || !!launchBlockedReason}
+              title={launchBlockedReason || undefined}
+              onClick={() => runAction(() => api.launchCampaign(id))}
+            >
               Launch campaign
             </button>
           )}
@@ -439,6 +494,9 @@ export default function CampaignDetailPage() {
       </div>
 
       {actionError && <div className="banner banner-error">{actionError}</div>}
+      {canLaunch && launchBlockedReason && !actionError && (
+        <div className="banner banner-info">{launchBlockedReason}</div>
+      )}
 
       <div className="tabs">
         <button className={`tab${tab === 'contacts' ? ' active' : ''}`} onClick={() => setTab('contacts')}>
