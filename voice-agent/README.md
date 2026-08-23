@@ -104,3 +104,25 @@ with `status=error`.
 ```powershell
 python -m pytest voice-agent/tests -v
 ```
+
+---
+
+## Note: running this worker via docker compose (devops lane)
+
+The repo-root `infra/docker-compose.yml` builds and runs this worker as the
+`voice-agent` service with:
+
+- `LIVEKIT_URL=ws://livekit:7880` - inside the compose network the worker must
+  use the `livekit` service DNS name. This is intentionally different from the
+  browser-facing URL (`ws://localhost:7880`) that the *backend* bakes into
+  playground tokens.
+- `BACKEND_INTERNAL_URL=http://backend:8000` and `INTERNAL_API_TOKEN` matching
+  the backend service (dev default: `change_me_internal`).
+- Provider keys passed through from `.env` (`DEEPGRAM_API_KEY`,
+  `CARTESIA_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`); missing keys degrade
+  sessions exactly as described above.
+- Command: `python agent.py` (this entrypoint starts the worker directly - no
+  `dev`/`start` subcommand needed).
+
+Full runbook, `.env` checklist, and troubleshooting: see `README_SETUP.md`
+at the repo root.
