@@ -1,7 +1,21 @@
-version: '3.8'
+# =============================================================================
+# AI Voice Calling Agent — local dev / web-testing stack
+# =============================================================================
+# Usage (from the repo root):
+#   docker compose --env-file .env -f infra/docker-compose.yml up --build -d
+#   ...or just run  scripts/dev-up.ps1  which does exactly that.
+#
+# Interpolation defaults below are OBVIOUS DEV PLACEHOLDERS. Fill real API keys
+# in .env (copy .env.example); never commit it.
+#
+# THIS PHASE PLACES NO TELEPHONY CALLS. The Twilio adapter is dormant; only
+# browser playground rooms (`playground-*`) are handled.
+#
+# Port map (host): frontend :3000 | backend :8000 | LiveKit signaling :7880
+#                  LiveKit RTC media :7881/tcp+udp | postgres :5432 | redis :6379
 
 services:
-  # PostgreSQL database
+  # --- PostgreSQL -----------------------------------------------------------
   db:
     image: postgres:16-alpine
     container_name: voice-agent-db
@@ -14,15 +28,18 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d voice_agent"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
 
-  # Redis for session state and rate-limiting queue
+  # --- Redis ------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: voice-agent-redis
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
     volumes:
@@ -31,75 +48,129 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 12
+    restart: unless-stopped
 
-  # Backend API (FastAPI) - stub for now
+  # --- Backend (FastAPI) ------------------------------------------------------
+  # Entrypoint is the app-package module path app.main:app (backend/main.py is
+  # a legacy shim kept importable).
   backend:
     build:
       context: ../backend
       dockerfile: Dockerfile
     container_name: voice-agent-backend
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/voice_agent
-      - REDIS_URL=redis://redis:6379/0
-      - ENVIRONMENT=development
-      - LOG_LEVEL=info
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/voice_agent
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change_me_dev}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change_me_internal}
+      ENVIRONMENT: development
+      LOG_LEVEL: info
+      # Browser origins allowed by CORS (frontend is served on :3000).
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      # LIVEKIT_URL here is what gets baked into playground tokens handed to
+      # the BROWSER — so it must be the host-facing URL, not the compose DNS
+      # name. The worker uses ws://livekit:7880 instead (see voice-agent below).
+      # Keys/secrets must still match across backend / voice-agent / livekit.
+      LIVEKIT_URL: ${LIVEKIT_URL:-ws://localhost:7880}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret_for_local_dev_only}
+      # Read-only mount so seed_demo.py can load domain-configs/*.json and the
+      # domain-configs router can list them (DOMAIN_CONFIGS_DIR=/domain-configs).
+      DOMAIN_CONFIGS_DIR: /domain-configs
     ports:
       - "8000:8000"
+    volumes:
+      - ../domain-configs:/domain-configs:ro
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ../backend:/app
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    healthcheck:
+      # python:slim ships no curl/wget; use stdlib urllib against /api/health.
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    # Explicit for visibility (matches the image CMD; module path is the app
+    # package, not the legacy main.py shim).
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
-  # Voice Agent (LiveKit Agents) - stub for now
+  # --- LiveKit (self-hosted dev server) ---------------------------------------
+  # Included UNCONDITIONALLY (not behind a profile) because browser playground
+  # testing is this phase's goal and it needs a reachable LiveKit at ws://localhost:7880.
+  # `--dev` mode = no cloud account required.
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: voice-agent-livekit
+    command: ["--dev", "--bind", "0.0.0.0"]
+    environment:
+      # --dev defaults to key "devkey" / secret "secret". We override the secret
+      # so backend, voice-agent and this server all agree on LIVEKIT_API_SECRET.
+      LIVEKIT_KEYS: "devkey: ${LIVEKIT_API_SECRET:-secret_for_local_dev_only}"
+    ports:
+      - "7880:7880"       # HTTP/WebSocket signaling
+      - "7881:7881"       # RTC over TCP fallback
+      - "7881:7881/udp"   # RTC media (UDP)
+    restart: unless-stopped
+
+  # --- Voice agent worker (LiveKit Agents runtime) -----------------------------
+  # Joins playground-* rooms; STT=Deepgram, TTS=Cartesia, LLM=Groq (OpenAI
+  # fallback). Talks to the backend internal API over the compose network.
   voice-agent:
     build:
       context: ../voice-agent
       dockerfile: Dockerfile
     container_name: voice-agent-voice
     environment:
-      - LIVEKIT_URL=${LIVEKIT_URL}
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - CARTESIA_API_KEY=${CARTESIA_API_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/voice_agent
-      - REDIS_URL=redis://redis:6379/0
-      - ENVIRONMENT=development
-      - LOG_LEVEL=info
-    ports:
-      - "8080:8080"
+      # Worker lives INSIDE the compose network -> use the service DNS name.
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret_for_local_dev_only}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change_me_internal}
+      BACKEND_INTERNAL_URL: http://backend:8000
+      ENVIRONMENT: development
+      LOG_LEVEL: info
     depends_on:
-      db:
+      backend:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ../voice-agent:/app
+      livekit:
+        condition: service_started
+    # No ports: the worker dials out to LiveKit/backend; nothing listens.
+    # No healthcheck: the worker serves no HTTP endpoint to probe.
     command: ["python", "agent.py"]
+    restart: unless-stopped
 
-  # Frontend (React) - stub for now
+  # --- Frontend (React/Vite built assets on nginx) -----------------------------
   frontend:
     build:
       context: ../frontend
       dockerfile: Dockerfile
+      args:
+        # Baked into the bundle at build time; browser hits the backend directly.
+        VITE_API_URL: http://localhost:8000
     container_name: voice-agent-frontend
-    environment:
-      - VITE_API_URL=http://localhost:8000
     ports:
-      - "3000:3000"
+      - "3000:80"
     depends_on:
-      - backend
-    volumes:
-      - ../frontend:/app
-      - /app/node_modules
-    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # nginx:alpine ships busybox wget.
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/index.html"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
 
 volumes:
   postgres_data:
