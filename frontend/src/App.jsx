@@ -3,12 +3,14 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { getToken } from './api.js';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
+import LandingPage from './pages/LandingPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import AgentsPage from './pages/AgentsPage.jsx';
 import AgentBuilderPage from './pages/AgentBuilderPage.jsx';
 import CampaignsPage from './pages/CampaignsPage.jsx';
 import CampaignDetailPage from './pages/CampaignDetailPage.jsx';
 import CallDetailPage from './pages/CallDetailPage.jsx';
+import GuidePage from './pages/GuidePage.jsx';
 import TestCallPage from './pages/TestCallPage.jsx';
 
 // livekit-client (~700 kB minified) is only needed on the Playground route —
@@ -24,17 +26,21 @@ function RouteFallback() {
   );
 }
 
-/** Redirects to /login when there is no stored JWT. */
-function RequireAuth({ children }) {
-  const location = useLocation();
-  if (!getToken()) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  }
-  return children;
-}
-
 function NotFound() {
   return <div className="empty-state">Page not found.</div>;
+}
+
+/**
+ * Route shell for everything behind login. Logged-out visitors get the public
+ * landing page at "/" and a redirect to /login everywhere else.
+ */
+function AuthShell() {
+  const location = useLocation();
+  if (!getToken()) {
+    if (location.pathname === '/') return <LandingPage />;
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+  return <Layout />;
 }
 
 export default function App() {
@@ -42,29 +48,26 @@ export default function App() {
     <BrowserRouter>
       <Suspense fallback={<RouteFallback />}>
         <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route
-          element={
-            <RequireAuth>
-              <Layout />
-            </RequireAuth>
-          }
-        >
-          <Route index element={<DashboardPage />} />
-          <Route path="agents" element={<AgentsPage />} />
-          {/* No key prop: navigating /agents/new -> /agents/:id/edit after
-              creation must preserve the wizard's in-memory state. */}
-          <Route path="agents/new" element={<AgentBuilderPage />} />
-          <Route path="agents/:id/edit" element={<AgentBuilderPage />} />
-          <Route path="playground" element={<PlaygroundPage />} />
-          <Route path="playground/:agentVersionId" element={<PlaygroundPage />} />
-          <Route path="campaigns" element={<CampaignsPage />} />
-          <Route path="campaigns/:id" element={<CampaignDetailPage />} />
-          <Route path="calls/:id" element={<CallDetailPage />} />
-          <Route path="test-call" element={<TestCallPage />} />
-          <Route path="dev" element={<DevToolsPage />} />
-          <Route path="*" element={<NotFound />} />
-        </Route>
+          <Route path="/login" element={<Login />} />
+          {/* Public marketing page. LandingPage itself bounces signed-in users home. */}
+          <Route path="/landing" element={<LandingPage />} />
+          <Route element={<AuthShell />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="agents" element={<AgentsPage />} />
+            {/* No key prop: navigating /agents/new -> /agents/:id/edit after
+                creation must preserve the wizard's in-memory state. */}
+            <Route path="agents/new" element={<AgentBuilderPage />} />
+            <Route path="agents/:id/edit" element={<AgentBuilderPage />} />
+            <Route path="playground" element={<PlaygroundPage />} />
+            <Route path="playground/:agentVersionId" element={<PlaygroundPage />} />
+            <Route path="campaigns" element={<CampaignsPage />} />
+            <Route path="campaigns/:id" element={<CampaignDetailPage />} />
+            <Route path="calls/:id" element={<CallDetailPage />} />
+            <Route path="guide" element={<GuidePage />} />
+            <Route path="test-call" element={<TestCallPage />} />
+            <Route path="dev" element={<DevToolsPage />} />
+            <Route path="*" element={<NotFound />} />
+          </Route>
         </Routes>
       </Suspense>
     </BrowserRouter>

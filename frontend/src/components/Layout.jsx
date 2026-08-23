@@ -34,29 +34,21 @@ function CampaignsIcon() {
   );
 }
 
-function PhoneIcon() {
+function GuideIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M6.6 10.8c1.5 2.9 3.8 5.2 6.7 6.7l2.2-2.2c.3-.3.7-.4 1.1-.3 1.2.4 2.5.6 3.9.6.6 0 1 .5 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.5.4-1 1-1h3.5c.5 0 1 .4 1 1 0 1.4.2 2.7.6 3.9.1.4 0 .8-.3 1.1l-2.2 2.3z" />
+      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm1 16v2h11v-2H7zm0-2h11V4H7v12z" />
     </svg>
   );
 }
 
-function WrenchIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M22 5.5a5.5 5.5 0 0 1-7.8 5L7 17.7A2.3 2.3 0 1 1 3.7 14l7.3-7.2A5.5 5.5 0 0 1 18.5 0L15 3.5 17.5 6 21 2.5c.6.9 1 1.9 1 3z" transform="scale(0.95) translate(0.5 1)" />
-    </svg>
-  );
-}
-
+// Exactly five items: everything else lives in the sidebar footer links below.
 const NAV_ITEMS = [
-  { to: '/', end: true, icon: <DashboardIcon />, label: 'Dashboard' },
+  { to: '/', end: true, icon: <DashboardIcon />, label: 'Home' },
   { to: '/agents', icon: <AgentsIcon />, label: 'Agents' },
   { to: '/playground', icon: <PlayIcon />, label: 'Playground' },
   { to: '/campaigns', icon: <CampaignsIcon />, label: 'Campaigns' },
-  { to: '/test-call', icon: <PhoneIcon />, label: 'Test Call' },
-  { to: '/dev', icon: <WrenchIcon />, label: 'Dev Tools' },
+  { to: '/guide', icon: <GuideIcon />, label: 'Guide' },
 ];
 
 const navClass = ({ isActive }) => `nav-link${isActive ? ' active' : ''}`;
@@ -95,6 +87,15 @@ export default function Layout() {
           <button type="button" className="btn btn-ghost btn-sm sidebar-logout" onClick={logout}>
             Sign out
           </button>
+        </div>
+        {/* Subtle utility links — kept out of the main nav on purpose. */}
+        <div className="sidebar-footlinks">
+          <NavLink to="/test-call" className="footlink">
+            Test Call
+          </NavLink>
+          <NavLink to="/dev" className="footlink">
+            Dev
+          </NavLink>
         </div>
         <div className="sidebar-footer">Phase 1 · English · India</div>
       </aside>
