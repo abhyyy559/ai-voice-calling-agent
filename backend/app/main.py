@@ -67,10 +67,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # --- routers ---------------------------------------------------------------
-    from app.routers import admin, auth, calls, campaigns, contacts, domain_configs
-    from app.routers import export, internal, test_call, twilio
+    from app.routers import (
+        admin,
+        agents,
+        auth,
+        calls,
+        campaigns,
+        contacts,
+        domain_configs,
+        export,
+        internal,
+        test_call,
+        twilio,
+    )
 
     fast_app.include_router(auth.router)
+    fast_app.include_router(agents.router)
+    fast_app.include_router(agents.agent_versions_router)
     fast_app.include_router(campaigns.router)
     fast_app.include_router(calls.router)
     fast_app.include_router(contacts.router)

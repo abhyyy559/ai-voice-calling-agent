@@ -24,7 +24,12 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """Resolve the ``Authorization: Bearer <jwt>`` user; 401 on any failure."""
+    """Resolve the ``Authorization: Bearer <jwt>`` user; 401 on any failure.
+
+    The token must carry an ``org`` claim matching the user's current org —
+    tokens without org context are rejected so stale/foreign credentials can
+    never resolve.
+    """
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=401, detail="not authenticated")
     settings = request.app.state.settings
@@ -35,7 +40,25 @@ def get_current_user(
     user = db.get(User, int(payload["sub"]))
     if user is None:
         raise HTTPException(status_code=401, detail="invalid or expired token")
+    org_claim = payload.get("org")
+    try:
+        org_matches = org_claim is not None and int(org_claim) == user.org_id
+    except (TypeError, ValueError):
+        org_matches = False
+    if not org_matches:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
     return user
+
+
+def require_roles(*roles: str):
+    """Dependency factory: allow only users whose role is in ``roles``."""
+
+    def checker(user: User = Depends(get_current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="insufficient role")
+        return user
+
+    return checker
 
 
 def get_org_or_404(db: Session, model: Any, entity_id: int, org_id: int) -> Any:

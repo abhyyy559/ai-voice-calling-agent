@@ -93,6 +93,78 @@ class User(Base):
     organization: Mapped[Organization] = relationship(back_populates="users")
 
 
+class Agent(Base):
+    """A configurable voice agent owned by an organization.
+
+    ``current_version_id`` is a *logical* FK to ``agent_versions.id`` (no ORM
+    constraint, mirroring ``contacts.last_call_id``) to avoid circular DDL —
+    versions reference their agent.
+    """
+
+    __tablename__ = "agents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    current_version_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    versions: Mapped[list["AgentVersion"]] = relationship(back_populates="agent")
+
+
+class AgentVersion(Base):
+    """An immutable snapshot of an agent's configuration ("training" = saving one).
+
+    Rows are never mutated through the API; a new version row is appended and
+    the agent's current_version_id advances.
+    """
+
+    __tablename__ = "agent_versions"
+    __table_args__ = (
+        Index("ix_agent_versions_agent_version", "agent_id", "version", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey("agents.id"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    company_context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    question_flow: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    extraction_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    disclosure_script: Mapped[str] = mapped_column(Text, nullable=False)
+    escalation_rules: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    voice_settings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Logical FK to users.id (creator).
+    created_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    agent: Mapped[Agent] = relationship(back_populates="versions")
+
+
+class KnowledgeDocument(Base):
+    """Reserved for RAG ingestion (spec §3): no runtime logic this phase."""
+
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    mime: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    storage_key: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+
+
 class DomainConfig(Base):
     """A versioned call-domain configuration (question flow, extraction schema, ...)."""
 
