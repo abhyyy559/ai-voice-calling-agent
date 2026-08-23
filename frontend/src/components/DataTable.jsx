@@ -3,8 +3,9 @@ import React from 'react';
 /**
  * Generic table.
  * columns: [{ key, label, render?(row), className?, width? }]
+ * emptyAction: optional CTA (button/link node) rendered under the empty message.
  */
-export default function DataTable({ columns, rows, rowKey, onRowClick, loading, empty }) {
+export default function DataTable({ columns, rows, rowKey, onRowClick, loading, empty, emptyAction }) {
   const isEmpty = !rows || rows.length === 0;
   return (
     <div className="table-wrap">
@@ -29,6 +30,7 @@ export default function DataTable({ columns, rows, rowKey, onRowClick, loading, 
             <tr>
               <td colSpan={columns.length} className="table-state">
                 {empty || 'Nothing here yet.'}
+                {!loading && emptyAction && <div className="empty-action">{emptyAction}</div>}
               </td>
             </tr>
           ) : (

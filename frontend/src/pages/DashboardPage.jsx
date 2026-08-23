@@ -90,7 +90,8 @@ export default function DashboardPage() {
 
       <div className="banner banner-info dashboard-flow-hint">
         <strong>Suggested first run:</strong> create an agent → save version 1 → talk to it in the Playground →
-        create a campaign with contacts → launch inside calling hours.
+        create a campaign with contacts → launch inside calling hours. New here?{' '}
+        <Link to="/guide">Follow the step-by-step Guide</Link>.
       </div>
     </div>
   );

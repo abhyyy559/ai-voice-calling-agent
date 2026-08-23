@@ -125,6 +125,11 @@ export default function CampaignsPage() {
           onRowClick={(c) => navigate(`/campaigns/${c.id}`)}
           loading={loading}
           empty="No campaigns yet. Create your first campaign to get started."
+          emptyAction={
+            <button type="button" className="btn btn-primary" onClick={() => setShowNew(true)}>
+              + Create your first campaign
+            </button>
+          }
         />
       </div>
 

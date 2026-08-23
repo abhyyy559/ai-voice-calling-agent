@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { authApi, setSession } from '../api.js';
 
 export default function Login() {
@@ -7,7 +7,8 @@ export default function Login() {
   const location = useLocation();
   const from = location.state && location.state.from ? location.state.from : '/';
 
-  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  // Landing-page "Register" CTAs deep-link into the register tab.
+  const [mode, setMode] = useState(location.state && location.state.mode === 'register' ? 'register' : 'login');
   const [form, setForm] = useState({ orgName: '', email: '', password: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -150,6 +151,12 @@ export default function Login() {
             <code>backend/scripts/seed_demo.py</code>).
           </p>
         )}
+
+        <div className="auth-back">
+          <Link className="btn btn-ghost btn-sm" to="/">
+            ← Back to home
+          </Link>
+        </div>
       </div>
     </div>
   );

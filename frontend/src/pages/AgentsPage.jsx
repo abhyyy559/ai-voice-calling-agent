@@ -147,10 +147,15 @@ export default function AgentsPage() {
           onRowClick={(a) => navigate(`/agents/${a.id}/edit`)}
           loading={loading}
           empty="No agents yet. Create your first agent to start building a call flow."
+          emptyAction={
+            <button type="button" className="btn btn-primary" onClick={() => navigate('/agents/new')}>
+              + Create your first agent
+            </button>
+          }
         />
       </div>
 
-      {!loading && agents && agents.length === 0 && !error && (
+      {!loading && agents && agents.length > 0 && (
         <p className="hint">
           Tip: an agent becomes callable once you save at least one version from the builder wizard.
         </p>
