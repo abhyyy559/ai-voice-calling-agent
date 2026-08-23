@@ -1,0 +1,33 @@
+{"domain_id": "absent-student",
+ "name": "Absent Student Follow-up",
+ "version": "1.0.0",
+ "system_prompt": "You are an AI voice assistant representing [Institution Name]. Your role is to contact parents or guardians of absent students to inquire about the reason for their absence and gather relevant details.",
+ "mandatory_disclosure": "Hello, I am calling from [Institution Name]. I am an AI voice assistant. This call is recorded for quality and verification purposes.",
+ "question_flow": [
+ {"step": 1, "question": "Could you please share the reason for [Student Name]'s absence today?"},
+ {"step": 2, "question": "Do you expect [Student Name] to return by [Expected Return Date]?"},
+ {"step": 3, "question": "Is the absence due to a medical reason? If yes, has a medical certificate been submitted?"},
+ {"step": 4, "question": "Would you like to provide any additional information or speak to a human representative?"}
+ ],
+ "extraction_schema": {
+ "reason_for_absence": {"type": "string", "description": "Reason provided for the student's absence.", "validation": "required", "confidence_threshold": 0.8},
+ "expected_return_date": {"type": "date", "description": "Anticipated return date of the student.", "validation": "required", "confidence_threshold": 0.8},
+ "is_sick_leave": {"type": "boolean", "description": "Whether the absence is due to illness.", "validation": "optional", "confidence_threshold": 0.7},
+ "medical_cert_submitted": {"type": "boolean", "description": "Confirmation of medical certificate submission.", "validation": "optional", "confidence_threshold": 0.7},
+ "call_outcome": {"type": "string", "description": "Outcome of the call (e.g., resolved, escalated).", "validation": "required", "confidence_threshold": 0.8},
+ "escalation_needed": {"type": "boolean", "description": "Whether human intervention is required.", "validation": "optional", "confidence_threshold": 0.7}
+ },
+ "escalation_rules": [
+ "Caller expresses anger or frustration.",
+ "Mention of grievance or complaint.",
+ "Indication of medical emergency.",
+ "Explicit request to speak to a human representative.",
+ "Inability to extract required information after three clarification attempts."
+ ],
+ "fallback_responses": [
+ "I apologize for the inconvenience. Could you please repeat your response?",
+ "Thank you for the information. I have noted your response.",
+ "I understand. Let me confirm: [Repeat extracted information].",
+ "I am here to assist. Please provide your details again."
+ ]
+}

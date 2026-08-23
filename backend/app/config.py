@@ -1,0 +1,81 @@
+"""Application settings (pydantic-settings) — all environment variables consumed by the backend.
+
+Every variable name matches the project-level `.env.example` maintained by devops.
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Runtime configuration, loaded from environment / .env file."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # --- infrastructure -------------------------------------------------
+    database_url: str = "sqlite:///./voice_agent.db"
+    redis_url: str = "redis://localhost:6379/0"
+    environment: str = "development"
+    log_level: str = "info"
+
+    # --- telephony (Twilio) ----------------------------------------------
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
+    twilio_validate_signature: bool = False
+
+    # Public https base URL of this backend (e.g. https://x.ngrok-free.app).
+    # TwiML webhooks and the Twilio Media Streams WS URL are derived from it.
+    public_base_url: str = "http://localhost:8000"
+    # Optional explicit override for the media websocket base (wss://host[:port]).
+    public_ws_base_url: str = ""
+
+    # --- calling hours / dialer -------------------------------------------
+    timezone: str = "Asia/Kolkata"
+    calling_hours_start: int = 9  # inclusive
+    calling_hours_end: int = 21  # exclusive
+    default_cps_limit: float = 1.0
+    default_concurrency_limit: int = 10
+    retry_max_attempts: int = 3
+    retry_backoff_minutes: int = 15
+    dialer_enabled: bool = True
+
+    # --- compliance --------------------------------------------------------
+    consent_enforcement: bool = True
+    # Comma-separated allowlist of phone numbers that bypass consent enforcement.
+    test_phone_numbers: str = ""
+    recording_retention_days: int = 90
+    retention_job_enabled: bool = True
+
+    # --- domain configs ------------------------------------------------------
+    # Default: ../domain-configs relative to repo root. In container: /domain-configs.
+    domain_configs_dir: str = "../domain-configs"
+
+    @property
+    def test_phone_number_list(self) -> list[str]:
+        """TEST_PHONE_NUMBERS split into a stripped list."""
+        return [p.strip() for p in self.test_phone_numbers.split(",") if p.strip()]
+
+    @property
+    def media_ws_base_url(self) -> str:
+        """Base URL for Twilio Media Streams websockets.
+
+        PUBLIC_WS_BASE_URL wins; otherwise derived from PUBLIC_BASE_URL by
+        switching the scheme (https->wss, http->ws).
+        """
+        if self.public_ws_base_url:
+            return self.public_ws_base_url.rstrip("/")
+        base = self.public_base_url.strip()
+        if base.startswith("https://"):
+            return "wss://" + base[len("https://"):].rstrip("/")
+        if base.startswith("http://"):
+            return "ws://" + base[len("http://"):].rstrip("/")
+        return base.rstrip("/")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached settings accessor (override via env before first call)."""
+    return Settings()

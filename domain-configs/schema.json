@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Domain Configuration Schema",
+  "type": "object",
+  "required": [
+    "domain_id",
+    "name",
+    "version",
+    "system_prompt",
+    "mandatory_disclosure",
+    "question_flow",
+    "extraction_schema",
+    "escalation_rules",
+    "fallback_responses"
+  ],
+  "properties": {
+    "domain_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Unique identifier in kebab-case"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Human-readable name of the domain"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version (major.minor.patch)"
+    },
+    "system_prompt": {
+      "type": "string",
+      "minLength": 10,
+      "description": "System prompt for the LLM agent"
+    },
+    "mandatory_disclosure": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Mandatory AI disclosure script per FR-11"
+    },
+    "question_flow": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of questions to ask during the call",
+      "items": {
+        "type": "object",
+        "required": ["step", "question"],
+        "properties": {
+          "step": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Step number in the flow"
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The question to ask the caller"
+          }
+        }
+      }
+    },
+    "extraction_schema": {
+      "type": "object",
+      "description": "Fields to extract from the conversation",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "description", "validation", "confidence_threshold"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["string", "date", "boolean", "number"],
+            "description": "Data type of the field"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of the field"
+          },
+          "validation": {
+            "type": "string",
+            "enum": ["required", "optional"],
+            "description": "Whether the field is required or optional"
+          },
+          "confidence_threshold": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Minimum confidence threshold for extraction"
+          }
+        }
+      }
+    },
+    "escalation_rules": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Conditions that trigger human escalation",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fallback_responses": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Responses for unhandled or low-confidence turns",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}
