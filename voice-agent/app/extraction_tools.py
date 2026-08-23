@@ -124,6 +124,11 @@ class ExtractionCoordinator:
             return self._wrap_up_reasons.pop(0)
         return None
 
+    @property
+    def flagged(self) -> Dict[str, str]:
+        """Read-only view of flagged fields (contract/QA discovery seam)."""
+        return self.flagged_fields
+
     def unfilled_required(self) -> List[str]:
         """Required fields with no accepted value yet."""
         return sorted(self.required_fields - set(self.recorded))
@@ -195,3 +200,8 @@ class VoiceAgentTools:
             summary=final_summary or None,
         )
         return f"Call ended. Summary posted: {final_summary}"
+
+
+# Alias used by the QA contract suite (Lane E) to discover the escalation
+# seam without coupling to this module's internal naming.
+ExtractionTracker = ExtractionCoordinator

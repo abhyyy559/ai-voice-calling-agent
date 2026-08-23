@@ -1,0 +1,534 @@
+"""Cascaded STT -> LLM -> TTS AgentSession pipeline (LiveKit Agents 1.x).
+
+Flow for an accepted job:
+
+1. Parse room metadata ``{"version_id": ..., "call_id": ...}``.
+2. Build Deepgram STT / Groq-or-OpenAI LLM / Cartesia TTS providers
+   (graceful degradation with clear logs if a key is missing).
+3. Fetch the agent-version config from the backend internal API (30s cache)
+   and render the system prompt (disclosure first).
+4. Run the AgentSession with VAD barge-in, per-turn latency instrumentation,
+   function tools for extraction and call end.
+5. Post transcript/latency turns per completed exchange and finalize the call.
+
+This module is only importable where ``livekit-agents`` is installed; the
+offline-tested logic lives in ``app.prompting`` / ``app.extraction_tools``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Mapping, Optional
+
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    function_tool,
+    llm,
+    stt as stt_module,
+    tts as tts_module,
+)
+from livekit.plugins import cartesia, deepgram, openai, silero
+
+from app.backend_client import BackendClient, BackendError
+from app.config import Settings
+from app.extraction_tools import (
+    LOW_CONFIDENCE_THRESHOLD,
+    MAX_ASKS_PER_FIELD,
+    ExtractionCoordinator,
+    VoiceAgentTools,
+)
+from app.prompting import render_system_prompt
+
+logger = logging.getLogger("voice_agent.pipeline")
+
+PLAYGROUND_PREFIX = "playground-"
+APOLOGY_TEXT = (
+    "Hello, this is an automated assistant. We're sorry, but we're unable to "
+    "continue this call right now due to a technical problem. Goodbye."
+)
+
+
+# --------------------------------------------------------------------------
+# Job parsing / provider construction
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ParsedJob:
+    """Identity of the call behind a LiveKit room."""
+
+    version_id: Any
+    call_id: str
+
+
+def parse_room_metadata(raw: Any) -> Optional[ParsedJob]:
+    """Parse ``{"version_id", "call_id"}`` room metadata defensively."""
+    if not raw:
+        return None
+    meta: Any = raw
+    if isinstance(raw, str):
+        try:
+            meta = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Room metadata is not valid JSON: %r", raw[:200])
+            return None
+    if not isinstance(meta, Mapping):
+        return None
+    version_id = meta.get("version_id")
+    call_id = str(meta.get("call_id") or "").strip()
+    if version_id is None or not call_id:
+        return None
+    return ParsedJob(version_id=version_id, call_id=call_id)
+
+
+@dataclass
+class ProviderBundle:
+    """Constructed providers plus human-readable degradation problems."""
+
+    stt: Optional[stt_module.STT]
+    llm: Optional[llm.LLM]
+    tts: Optional[tts_module.TTS]
+    problems: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return self.stt is not None and self.llm is not None and self.tts is not None
+
+
+def build_providers(settings: Settings) -> ProviderBundle:
+    """Build STT/LLM/TTS from settings; missing keys degrade, never raise."""
+    bundle = ProviderBundle(stt=None, llm=None, tts=None)
+
+    if settings.deepgram_api_key:
+        bundle.stt = deepgram.STT(
+            model="nova-3", language="en", api_key=settings.deepgram_api_key
+        )
+    else:
+        bundle.problems.append(
+            "DEEPGRAM_API_KEY missing - speech-to-text disabled"
+        )
+
+    if settings.cartesia_api_key:
+        bundle.tts = cartesia.TTS(api_key=settings.cartesia_api_key)
+    else:
+        bundle.problems.append("CARTESIA_API_KEY missing - text-to-speech disabled")
+
+    if settings.groq_api_key:
+        bundle.llm = openai.LLM.with_groq(
+            model=settings.groq_model, api_key=settings.groq_api_key
+        )
+    elif settings.openai_api_key:
+        logger.info(
+            "GROQ_API_KEY missing - falling back to OpenAI %s",
+            settings.openai_model,
+        )
+        bundle.llm = openai.LLM(
+            model=settings.openai_model,
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
+    else:
+        bundle.problems.append("No LLM key (GROQ_API_KEY / OPENAI_API_KEY) set")
+
+    return bundle
+
+
+# --------------------------------------------------------------------------
+# Per-exchange latency + transcript telemetry
+# --------------------------------------------------------------------------
+
+
+class TurnTelemetry:
+    """Accumulates one exchange (user utterance + agent reply), posts it.
+
+    Latency definitions (all milliseconds):
+    - ``stt_final_ms``: end-of-speech -> final user transcript (prefers the
+      LiveKit EOU metric's ``eou_delay``; wall-clock fallback otherwise).
+    - ``llm_first_token_ms``: LLM time-to-first-token metric.
+    - ``tts_first_audio_ms``: TTS time-to-first-audio-byte metric.
+    - ``e2e_ms``: approximated speech-to-speech =
+      eou_delay + llm_ttfb + tts_ttfb.
+    """
+
+    def __init__(self, session: AgentSession, backend: BackendClient, call_id: str) -> None:
+        self._session = session
+        self._backend = backend
+        self._call_id = call_id
+        self._turn_index = 0
+        self._flush_lock = asyncio.Lock()
+        self._reset()
+
+    def _reset(self) -> None:
+        self._user_text = ""
+        self._agent_text = ""
+        self._end_of_speech_at: Optional[float] = None
+        self._stt_final_ms: Optional[float] = None
+        self._llm_first_token_ms: Optional[float] = None
+        self._tts_first_audio_ms: Optional[float] = None
+
+    def attach(self) -> None:
+        """Wire session event + metrics callbacks."""
+        self._session.on("user_stopped_speaking")(self._on_user_stopped_speaking)
+        self._session.on("user_input_transcribed")(self._on_user_input_transcribed)
+        self._session.on("conversation_item_added")(self._on_conversation_item_added)
+        self._session.on("agent_stopped_speaking")(self._on_agent_stopped_speaking)
+        collector = getattr(self._session, "metrics", None)
+        if collector is not None:
+            collector.on("eou_metrics")(self._on_eou_metrics)
+            collector.on("llm_metrics")(self._on_llm_metrics)
+            collector.on("tts_metrics")(self._on_tts_metrics)
+
+    # -- event handlers ----------------------------------------------------
+
+    def _on_user_stopped_speaking(self, *_args: Any) -> None:
+        self._end_of_speech_at = time.monotonic()
+
+    def _on_user_input_transcribed(self, ev: Any) -> None:
+        if not getattr(ev, "is_final", False):
+            return
+        transcript = str(getattr(ev, "transcript", "") or "").strip()
+        if not transcript:
+            return
+        self._user_text = f"{self._user_text} {transcript}".strip()
+        if self._end_of_speech_at is not None:
+            elapsed_ms = (time.monotonic() - self._end_of_speech_at) * 1000.0
+            # Keep the first measurement for this exchange; EOU metric refines it.
+            if self._stt_final_ms is None:
+                self._stt_final_ms = elapsed_ms
+
+    def _on_conversation_item_added(self, ev: Any) -> None:
+        item = getattr(ev, "item", None)
+        if item is None:
+            return
+        role = str(getattr(item, "role", "")).lower()
+        text = str(getattr(item, "text_content", "") or "").strip()
+        if role == "assistant" and text:
+            self._agent_text = f"{self._agent_text} {text}".strip()
+
+    def _on_agent_stopped_speaking(self, *_args: Any) -> None:
+        asyncio.ensure_future(self.flush_pending())
+
+    # -- metrics handlers ---------------------------------------------------
+
+    def _on_eou_metrics(self, m: Any) -> None:
+        delay_seconds = float(getattr(m, "eou_delay", 0.0) or 0.0)
+        if delay_seconds > 0:
+            self._stt_final_ms = delay_seconds * 1000.0
+
+    def _on_llm_metrics(self, m: Any) -> None:
+        ttfb_seconds = float(getattr(m, "ttfb", 0.0) or 0.0)
+        if ttfb_seconds > 0:
+            self._llm_first_token_ms = ttfb_seconds * 1000.0
+
+    def _on_tts_metrics(self, m: Any) -> None:
+        ttfb_seconds = float(getattr(m, "ttfb", 0.0) or 0.0)
+        if ttfb_seconds > 0:
+            self._tts_first_audio_ms = ttfb_seconds * 1000.0
+
+    # -- flushing ------------------------------------------------------------
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+    def _round(self, value: Optional[float]) -> Optional[int]:
+        return None if value is None else round(value)
+
+    async def flush_pending(self) -> None:
+        """Post the current exchange (if any) as turn rows and log once."""
+        async with self._flush_lock:
+            if not self._user_text and not self._agent_text:
+                return
+            self._turn_index += 1
+            turn_index = self._turn_index
+            timestamp = self._utc_now_iso()
+
+            e2e_ms: Optional[float] = None
+            if (
+                self._stt_final_ms is not None
+                and self._llm_first_token_ms is not None
+                and self._tts_first_audio_ms is not None
+            ):
+                e2e_ms = (
+                    self._stt_final_ms
+                    + self._llm_first_token_ms
+                    + self._tts_first_audio_ms
+                )
+
+            rows: list[dict[str, Any]] = []
+            rows.append(
+                {
+                    "turn_index": turn_index,
+                    "speaker": "user",
+                    "text": self._user_text,
+                    "timestamp": timestamp,
+                    "stt_final_ms": self._round(self._stt_final_ms),
+                    "llm_first_token_ms": None,
+                    "tts_first_audio_ms": None,
+                    "e2e_ms": None,
+                }
+            )
+            if self._agent_text:
+                rows.append(
+                    {
+                        "turn_index": turn_index,
+                        "speaker": "agent",
+                        "text": self._agent_text,
+                        "timestamp": timestamp,
+                        "stt_final_ms": None,
+                        "llm_first_token_ms": self._round(self._llm_first_token_ms),
+                        "tts_first_audio_ms": self._round(self._tts_first_audio_ms),
+                        "e2e_ms": self._round(e2e_ms),
+                    }
+                )
+
+            ok = await self._backend.post_turns(self._call_id, rows)
+            # One structured log line per completed exchange.
+            logger.info(
+                "%s",
+                json.dumps(
+                    {
+                        "event": "turn_latency",
+                        "call_id": self._call_id,
+                        "turn_index": turn_index,
+                        "posted": ok,
+                        "stt_final_ms": self._round(self._stt_final_ms),
+                        "llm_first_token_ms": self._round(self._llm_first_token_ms),
+                        "tts_first_audio_ms": self._round(self._tts_first_audio_ms),
+                        "e2e_ms": self._round(e2e_ms),
+                        "user_chars": len(self._user_text),
+                        "agent_chars": len(self._agent_text),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            self._reset()
+
+
+# --------------------------------------------------------------------------
+# The conversational agent
+# --------------------------------------------------------------------------
+
+
+class DomainCallAgent(Agent):
+    """Config-driven interview agent with extraction + end-call tools."""
+
+    def __init__(self, instructions: str, tools_impl: VoiceAgentTools) -> None:
+        self._tools_impl = tools_impl
+        super().__init__(
+            instructions=instructions,
+            tools=[],
+        )
+
+    @function_tool
+    async def record_extracted_field(
+        self, field_name: str, value: str, confidence: float
+    ) -> str:
+        """Record a structured value extracted from the caller's answer.
+
+        Always report your HONEST confidence between 0.0 and 1.0. Never guess:
+        if you are unsure, ask a clarifying question instead of calling this.
+
+        Args:
+            field_name: Exact field name from the extraction schema.
+            value: The value exactly as the caller stated it.
+            confidence: Your honest confidence in the value (0.0 to 1.0).
+        """
+        return await self._tools_impl.record_extracted_field(
+            field_name, value, confidence
+        )
+
+    @function_tool
+    async def end_call(self, summary: str) -> str:
+        """Politely finish the call and post its summary.
+
+        Call this when all questions are handled, the caller wants to stop,
+        or escalation rules say to wrap up. Summarize captured fields and any
+        flagged/unfilled required fields factually - never invent values.
+
+        Args:
+            summary: Factual wrap-up summary of the conversation.
+        """
+        return await self._tools_impl.end_call(summary)
+
+
+# --------------------------------------------------------------------------
+# Session orchestration
+# --------------------------------------------------------------------------
+
+
+def _room_metadata(ctx: JobContext) -> Any:
+    return getattr(ctx.room, "metadata", None)
+
+
+async def _is_connected(ctx: JobContext) -> bool:
+    state = getattr(ctx.room, "connection_state", None)
+    try:
+        from livekit import rtc
+
+        return state == rtc.ConnectionState.CONN_CONNECTED
+    except Exception:  # pragma: no cover - defensive
+        return bool(state)
+
+
+async def _shutdown_ctx(ctx: JobContext) -> None:
+    result = ctx.shutdown()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _required_fields_from_schema(config: Mapping[str, Any]) -> frozenset[str]:
+    schema = config.get("extraction_schema")
+    required: set[str] = set()
+    if isinstance(schema, Mapping):
+        for name, spec in schema.items():
+            if isinstance(spec, Mapping):
+                validation = str(spec.get("validation") or "").strip().lower()
+                if validation == "required":
+                    required.add(str(name))
+    return frozenset(required)
+
+
+async def run_session(ctx: JobContext, settings: Settings) -> None:
+    """Full lifecycle for one accepted playground job. Never raises."""
+    room_name = ctx.room.name or ""
+    backend = BackendClient(settings.backend_internal_url, settings.internal_api_token)
+    parsed: Optional[ParsedJob] = parse_room_metadata(_room_metadata(ctx))
+    call_id: Optional[str] = parsed.call_id if parsed else None
+    session: Optional[AgentSession] = None
+    telemetry: Optional[TurnTelemetry] = None
+
+    try:
+        # Metadata sometimes only materializes after connecting to the room.
+        if parsed is None:
+            await ctx.connect()
+            parsed = parse_room_metadata(_room_metadata(ctx))
+
+        if parsed is None:
+            reason = (
+                f"room '{room_name}' metadata missing version_id/call_id "
+                "- closing gracefully"
+            )
+            logger.error("%s", reason)
+            await _degrade(ctx, backend, call_id, settings, reason)
+            return
+
+        call_id = parsed.call_id
+        logger.info(
+            "Accepted playground job: room=%s version=%s call=%s",
+            room_name,
+            parsed.version_id,
+            call_id,
+        )
+
+        missing_required = settings.missing_required()
+        if missing_required:
+            reason = f"required env vars unset: {', '.join(missing_required)}"
+            logger.error("%s", reason)
+            await _degrade(ctx, backend, call_id, settings, reason)
+            return
+
+        bundle = build_providers(settings)
+        for problem in bundle.problems:
+            logger.error("Provider problem: %s", problem)
+        if not bundle.complete:
+            await _degrade(
+                ctx, backend, call_id, settings, "; ".join(bundle.problems)
+            )
+            return
+        assert bundle.stt is not None and bundle.llm is not None
+        assert bundle.tts is not None
+
+        # Load config (cached 30s server-side here via BackendClient).
+        try:
+            config: Mapping[str, Any] = await backend.get_agent_config(parsed.version_id)
+        except BackendError as exc:
+            await _degrade(
+                ctx, backend, call_id, settings, f"failed to load agent config: {exc}"
+            )
+            return
+
+        instructions = render_system_prompt(config)
+        coordinator = ExtractionCoordinator(
+            required_fields=_required_fields_from_schema(config),
+            low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
+            max_asks_per_field=MAX_ASKS_PER_FIELD,
+        )
+        tools_impl = VoiceAgentTools(coordinator, backend, call_id)
+
+        session = AgentSession(
+            stt=bundle.stt,
+            llm=bundle.llm,
+            tts=bundle.tts,
+            vad=silero.VAD.load(),
+        )
+        telemetry = TurnTelemetry(session=session, backend=backend, call_id=call_id)
+        telemetry.attach()
+
+        if not await _is_connected(ctx):
+            await ctx.connect()
+
+        agent = DomainCallAgent(instructions=instructions, tools_impl=tools_impl)
+        await session.start(room=ctx.room, agent=agent)
+    except Exception:
+        logger.exception("Unhandled error in voice session (room=%s)", room_name)
+        try:
+            await _degrade(
+                ctx, backend, call_id, settings, "unexpected voice-agent error"
+            )
+        except Exception:  # pragma: no cover - last resort
+            logger.exception("Degradation path also failed (room=%s)", room_name)
+    finally:
+        if telemetry is not None:
+            try:
+                await telemetry.flush_pending()
+            except Exception:
+                logger.exception("Final telemetry flush failed")
+        await backend.aclose()
+
+
+async def _degrade(
+    ctx: JobContext,
+    backend: BackendClient,
+    call_id: Optional[str],
+    settings: Settings,
+    reason: str,
+) -> None:
+    """Graceful failure path: join, apologize if possible, flag, never crash."""
+    logger.error("Degrading session: %s", reason)
+    try:
+        if not await _is_connected(ctx):
+            await ctx.connect()
+    except Exception:
+        logger.exception("Could not connect while degrading")
+
+    # Speak the apology through whatever TTS is configured, best-effort.
+    try:
+        bundle = build_providers(settings)
+        if bundle.tts is not None:
+            apology_session = AgentSession(
+                stt=bundle.stt,
+                llm=bundle.llm,
+                tts=bundle.tts,
+            )
+            if not await _is_connected(ctx):
+                await ctx.connect()
+            await apology_session.start(room=ctx.room, agent=Agent(instructions=""))
+            await apology_session.say(APOLOGY_TEXT, allow_interruptions=False)
+    except Exception:
+        logger.exception("Apology playback failed (best-effort)")
+
+    if call_id:
+        posted = await backend.post_complete(
+            call_id, status="error", error=reason
+        )
+        if not posted:
+            logger.error("Could not post error completion for call %s", call_id)
