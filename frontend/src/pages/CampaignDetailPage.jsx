@@ -6,7 +6,7 @@ import StatusBadge, { statusLabel } from '../components/StatusBadge.jsx';
 import Modal from '../components/Modal.jsx';
 import DataTable from '../components/DataTable.jsx';
 import CountsCards from '../components/CountsCards.jsx';
-import ColumnMapper, { EMPTY_MAPPING, guessMapping, parseCsvHeader } from '../components/ColumnMapper.jsx';
+import ContactImport from '../components/ContactImport.jsx';
 
 const PAGE_SIZE = 50;
 const CONTACT_STATUS_FILTERS = [
@@ -182,86 +182,13 @@ export default function CampaignDetailPage() {
   const totalPages = contactsData ? Math.max(1, Math.ceil((contactsData.total || 0) / (contactsData.page_size || PAGE_SIZE))) : 1;
 
   // ---- import ----
-  const [file, setFile] = useState(null);
-  const [fileKey, setFileKey] = useState(0);
-  const [headers, setHeaders] = useState(null);
-  const [mapping, setMapping] = useState({ ...EMPTY_MAPPING });
-  const [customRows, setCustomRows] = useState([]);
-  const [consentDefault, setConsentDefault] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
-  const [importError, setImportError] = useState(null);
 
-  async function onFileChange(e) {
-    const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
-    setFile(f);
-    setImportResult(null);
-    setImportError(null);
-    setCustomRows([]);
-    if (!f) {
-      setHeaders(null);
-      setMapping({ ...EMPTY_MAPPING });
-      return;
-    }
-    if (/\.(csv|tsv|txt)$/i.test(f.name)) {
-      try {
-        const text = await f.text();
-        const hdrs = parseCsvHeader(text);
-        setHeaders(hdrs.length ? hdrs : null);
-        setMapping(hdrs.length ? guessMapping(hdrs) : { ...EMPTY_MAPPING });
-      } catch {
-        setHeaders(null);
-        setMapping({ ...EMPTY_MAPPING });
-      }
-    } else {
-      // XLSX: cannot parse headers client-side without a spreadsheet lib.
-      setHeaders(null);
-      setMapping({ ...EMPTY_MAPPING });
-    }
-  }
-
-  function resetImportPanel() {
-    setFile(null);
-    setFileKey((k) => k + 1);
-    setHeaders(null);
-    setMapping({ ...EMPTY_MAPPING });
-    setCustomRows([]);
-  }
-
-  async function doImport() {
-    if (!file || !mapping.phone_col) return;
-    setImporting(true);
-    setImportError(null);
-    setImportResult(null);
-    const custom = {};
-    customRows.forEach((r) => {
-      if (r.field && r.col) custom[r.field] = r.col;
-    });
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append(
-      'mapping',
-      JSON.stringify({
-        name_col: mapping.name_col || null,
-        phone_col: mapping.phone_col || null,
-        id_col: mapping.id_col || null,
-        consent_col: mapping.consent_col || null,
-        custom,
-      })
-    );
-    fd.append('consent_default', consentDefault ? 'true' : 'false');
-    try {
-      const result = await api.importContacts(id, fd);
-      setImportResult(result || {});
-      resetImportPanel();
-      setPage(1);
-      refreshContacts();
-      reloadDash();
-    } catch (e) {
-      setImportError(e.message || 'Import failed.');
-    } finally {
-      setImporting(false);
-    }
+  function onImported(result) {
+    setImportResult(result || {});
+    setPage(1);
+    refreshContacts();
+    reloadDash();
   }
 
   // ---- edit / delete contact ----
@@ -509,55 +436,24 @@ export default function CampaignDetailPage() {
 
       {tab === 'contacts' && (
         <div className="stack">
-          <div className="card upload-panel">
-            <h3 className="card-title">Import contacts</h3>
-            <p className="hint">
-              Upload a CSV or XLSX contact list, then map its columns. CSV column headers are detected automatically;
-              for XLSX you can type the exact column headers.
-            </p>
-            <div className="file-row">
-              <input key={fileKey} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" onChange={onFileChange} />
+          <ContactImport campaignId={id} onImported={onImported} />
+
+          {importResult && (
+            <div className={`banner ${importResult.imported > 0 ? 'banner-success' : 'banner-error'}`}>
+              <strong>
+                Imported {importResult.imported ?? 0} contact{importResult.imported === 1 ? '' : 's'}
+              </strong>
+              {importResult.invalid ? ` · ${importResult.invalid} skipped as invalid` : ''}
+              {importResult.errors && importResult.errors.length > 0 && (
+                <ul className="error-list">
+                  {importResult.errors.slice(0, 8).map((err, i) => (
+                    <li key={i}>{String(err)}</li>
+                  ))}
+                  {importResult.errors.length > 8 && <li>… and {importResult.errors.length - 8} more</li>}
+                </ul>
+              )}
             </div>
-
-            {file && (
-              <ColumnMapper
-                headers={headers}
-                mapping={mapping}
-                onMappingChange={setMapping}
-                customRows={customRows}
-                onCustomRowsChange={setCustomRows}
-                consentDefault={consentDefault}
-                onConsentDefaultChange={setConsentDefault}
-              />
-            )}
-
-            {file && (
-              <div className="upload-actions">
-                <button className="btn btn-primary" disabled={importing || !mapping.phone_col} onClick={doImport}>
-                  {importing ? 'Importing…' : `Import “${file.name}”`}
-                </button>
-                {!mapping.phone_col && <span className="hint hint-error">Map the phone column to enable import.</span>}
-              </div>
-            )}
-
-            {importError && <div className="banner banner-error">{importError}</div>}
-            {importResult && (
-              <div className={`banner ${importResult.imported > 0 ? 'banner-success' : 'banner-error'}`}>
-                <strong>
-                  Imported {importResult.imported ?? 0} contact{importResult.imported === 1 ? '' : 's'}
-                </strong>
-                {importResult.invalid ? ` · ${importResult.invalid} skipped as invalid` : ''}
-                {importResult.errors && importResult.errors.length > 0 && (
-                  <ul className="error-list">
-                    {importResult.errors.slice(0, 8).map((err, i) => (
-                      <li key={i}>{String(err)}</li>
-                    ))}
-                    {importResult.errors.length > 8 && <li>… and {importResult.errors.length - 8} more</li>}
-                  </ul>
-                )}
-              </div>
-            )}
-          </div>
+          )}
 
           <div className="card flush">
             <div className="table-toolbar">

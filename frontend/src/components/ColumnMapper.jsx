@@ -2,16 +2,9 @@ import React from 'react';
 
 export const EMPTY_MAPPING = { name_col: null, phone_col: null, id_col: null, consent_col: null };
 
-/**
- * Parse the header (first) row of a delimited text file (CSV/TSV).
- * Detects the delimiter among , ; tab | and honors quoted cells. Returns string[] of column names.
- */
-export function parseCsvHeader(text) {
-  const clean = String(text).replace(/^\uFEFF/, '');
-  const firstLine = clean.split(/\r?\n/, 1)[0] || '';
-  const delim = detectDelimiter(firstLine);
-  return parseHeaderRow(clean, delim);
-}
+// ---------------------------------------------------------------------------
+// Delimited-text (CSV/TSV) parsing — quote-aware, delimiter auto-detected.
+// ---------------------------------------------------------------------------
 
 function detectDelimiter(firstLine) {
   const candidates = [',', ';', '\t', '|'];
@@ -27,15 +20,36 @@ function detectDelimiter(firstLine) {
   return best;
 }
 
-function parseHeaderRow(text, delim) {
-  const cells = [];
+/**
+ * Parse a whole delimited text file into an array of row arrays.
+ * Handles quoted cells (including newlines and escaped "" inside quotes).
+ */
+export function parseDelimited(text) {
+  const clean = String(text).replace(/^\uFEFF/, '');
+  const firstBreak = clean.search(/[\r\n]/);
+  const firstLine = firstBreak === -1 ? clean : clean.slice(0, firstBreak);
+  const delim = detectDelimiter(firstLine);
+
+  const rows = [];
+  let row = [];
   let cur = '';
   let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+
+  const pushCell = () => {
+    row.push(cur.trim());
+    cur = '';
+  };
+  const pushRow = () => {
+    pushCell();
+    if (row.length > 1 || (row.length === 1 && row[0] !== '')) rows.push(row);
+    row = [];
+  };
+
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i];
     if (inQuotes) {
       if (ch === '"') {
-        if (text[i + 1] === '"') {
+        if (clean[i + 1] === '"') {
           cur += '"';
           i++;
         } else {
@@ -47,53 +61,80 @@ function parseHeaderRow(text, delim) {
     } else if (ch === '"') {
       inQuotes = true;
     } else if (ch === delim) {
-      cells.push(cur.trim());
-      cur = '';
+      pushCell();
     } else if (ch === '\n' || ch === '\r') {
-      if (ch === '\r' && text[i + 1] === '\n') i++;
-      break;
+      if (ch === '\r' && clean[i + 1] === '\n') i++;
+      pushRow();
     } else {
       cur += ch;
     }
   }
-  if (cur.trim() !== '' || cells.length > 0) cells.push(cur.trim());
-  return cells;
+  pushRow();
+  return rows;
 }
 
-/** Best-effort auto-mapping of recognizable columns. */
+// ---------------------------------------------------------------------------
+// Phone validation (India-first, tolerant of formatting)
+// ---------------------------------------------------------------------------
+
+/** Strip spaces, dashes, dots and brackets so "+91 98480 12345" becomes comparable. */
+export function normalizePhoneValue(value) {
+  if (value == null) return '';
+  return String(value).trim().replace(/[().\-\s]/g, '');
+}
+
+/**
+ * True when the value looks like a dialable number:
+ * Indian mobile (optionally +91/0 prefixed) or any E.164-style number.
+ */
+export function isValidPhoneValue(value) {
+  const s = normalizePhoneValue(value);
+  if (!s || !/^\+?[0-9]+$/.test(s)) return false;
+  if (/^(?:\+?91|0)?[6-9]\d{9}$/.test(s)) return true;
+  if (/^\+?[1-9]\d{7,14}$/.test(s)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-mapping (best guess, never asks the user to type column names)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fuzzy-match detected headers onto target fields. Exact/common names win,
+ * looser substring matches are the fallback. Chosen columns never collide.
+ */
 export function guessMapping(headers) {
   if (!Array.isArray(headers)) return { ...EMPTY_MAPPING };
-  const find = (test) => headers.find((h) => test(String(h).toLowerCase())) || null;
-  return {
-    name_col: find((h) => /(^|[\s_\-.])name($|[\s_\-.])|fullname|full_name|student/.test(h)),
-    phone_col: find((h) => /phone|mobile|number|contact|whatsapp/.test(h) && !/id$/.test(h)),
-    id_col: find((h) => /(^|[\s_\-.])(id|roll|roll_?no|roll_?number|enrollment|external[\s_\-]?id)($|[\s_\-.])/.test(h) || /(^|[\s_\-.])id$/.test(h)),
-    consent_col: find((h) => /consent|permission|opt[\s_\-]?in/.test(h)),
+  const norm = headers.map((h) => String(h).toLowerCase().replace(/[\s\-]+/g, '_'));
+  const taken = new Set();
+  const find = (exactRe, looseRe) => {
+    let idx = norm.findIndex((h, i) => !taken.has(i) && exactRe.test(h));
+    if (idx === -1) idx = norm.findIndex((h, i) => !taken.has(i) && looseRe.test(h));
+    if (idx === -1) return null;
+    taken.add(idx);
+    return headers[idx];
   };
+
+  const phone_col = find(
+    /^(phone|phone_?no|phone_?number|mobile|mobile_?no|mobile_?number|number|contact_?number|whatsapp|msisdn|cell)$/,
+    /(phone|mobile|whatsapp|msisdn|number)/
+  );
+  const name_col = find(
+    /^(name|full_?name|student_?name|first_?name|given_?name|contact_?name|customer_?name)$/,
+    /(^|_)(name)(_|$)/
+  );
+  const id_col = find(
+    /^(id|roll|roll_?no|roll_?number|enrollment|enrollment_?no|external_?id|regd?_?no)$/,
+    /(^|_)(id|roll|enrollment)(_no)?$/
+  );
+  const consent_col = find(/^(consent|consent_?given|permission|opt_?in)$/, /consent|permission|opt_?in/);
+
+  return { name_col, phone_col, id_col, consent_col };
 }
 
-function ColumnSelect({ headers, value, onChange, required }) {
-  if (headers && headers.length > 0) {
-    return (
-      <select value={value || ''} onChange={(e) => onChange(e.target.value || null)}>
-        <option value="">— Not mapped —</option>
-        {headers.map((h, idx) => (
-          <option key={`${h}-${idx}`} value={h}>
-            {h}
-          </option>
-        ))}
-      </select>
-    );
-  }
-  return (
-    <input
-      type="text"
-      value={value || ''}
-      placeholder={required ? 'Exact column header (required)' : 'Exact column header'}
-      onChange={(e) => onChange(e.target.value || null)}
-    />
-  );
-}
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
 
 const TARGETS = [
   { key: 'name_col', label: 'Contact name', required: false },
@@ -102,18 +143,35 @@ const TARGETS = [
   { key: 'consent_col', label: 'Consent', required: false },
 ];
 
+function HeaderSelect({ headers, value, onChange }) {
+  return (
+    <select value={value || ''} onChange={(e) => onChange(e.target.value || null)}>
+      <option value="">— Not mapped —</option>
+      {headers.map((h, idx) => (
+        <option key={`${h}-${idx}`} value={h}>
+          {h}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /**
- * Column mapping UI.
- * headers: string[] when known (CSV parsed client-side), or null/[] for XLSX (manual entry).
+ * Column mapping UI fed entirely by the client-side parser — users pick from
+ * DETECTED headers, they never type column names. Also renders a small
+ * preview of the first rows, flagging invalid phone values inline.
+ *
+ * headers: string[] (from CSV/XLSX parse)
+ * rows: string[][] data rows (header row excluded)
  */
 export default function ColumnMapper({
   headers,
+  rows = [],
+  maxPreviewRows = 5,
   mapping,
   onMappingChange,
-  customRows,
+  customRows = [],
   onCustomRowsChange,
-  consentDefault,
-  onConsentDefaultChange,
 }) {
   const known = Array.isArray(headers) && headers.length > 0;
   const setField = (key, val) => onMappingChange({ ...mapping, [key]: val });
@@ -123,19 +181,28 @@ export default function ColumnMapper({
     onCustomRowsChange(next);
   };
 
+  if (!known) return null;
+
+  const nameIdx = headers.indexOf(mapping.name_col);
+  const phoneIdx = headers.indexOf(mapping.phone_col);
+  const idIdx = headers.indexOf(mapping.id_col);
+  const consentIdx = headers.indexOf(mapping.consent_col);
+  const preview = rows.slice(0, maxPreviewRows);
+
+  const cellClass = (colIdx) => {
+    if (colIdx === phoneIdx) return 'preview-cell preview-phone';
+    if (colIdx === nameIdx || colIdx === idIdx || colIdx === consentIdx) return 'preview-cell preview-mapped';
+    return 'preview-cell';
+  };
+
+  const phoneBad = (value, colIdx) => colIdx === phoneIdx && !isValidPhoneValue(value);
+
   return (
     <div className="mapper">
-      {known ? (
-        <p className="hint">
-          Detected {headers.length} columns. Confirm the mapping below — the highlighted column names come straight from
-          your file's header row.
-        </p>
-      ) : (
-        <div className="banner banner-info">
-          Column headers could not be previewed for this file type (XLSX). Type the exact column header names from your
-          file for each field you want to import.
-        </div>
-      )}
+      <p className="hint">
+        We found <strong>{headers.length} column{headers.length === 1 ? '' : 's'}</strong> in your file. Confirm what each
+        field below means — we pre-filled our best guess, change any dropdown if needed.
+      </p>
 
       <div className="mapper-rows">
         {TARGETS.map((t) => (
@@ -145,16 +212,59 @@ export default function ColumnMapper({
               {t.required ? <span className="req-star"> *</span> : null}
             </label>
             <div className="mapper-control">
-              <ColumnSelect
-                headers={known ? headers : null}
-                value={mapping[t.key]}
-                onChange={(v) => setField(t.key, v)}
-                required={t.required}
-              />
+              <HeaderSelect headers={headers} value={mapping[t.key]} onChange={(v) => setField(t.key, v)} />
             </div>
           </div>
         ))}
       </div>
+
+      {preview.length > 0 && (
+        <div className="import-preview-wrap">
+          <p className="preview-caption">
+            First {Math.min(preview.length, maxPreviewRows)} rows — highlighted columns are the ones you mapped above.
+          </p>
+          <div className="table-wrap import-preview">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  {headers.map((h, idx) => (
+                    <th key={`${h}-${idx}`} className={idx === phoneIdx ? 'preview-head-phone' : undefined}>
+                      {h || '—'}
+                      {idx === phoneIdx ? ' · phone' : ''}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {preview.map((row, ri) => {
+                  const rowHasBadPhone = phoneIdx >= 0 && phoneBad(row[phoneIdx], phoneIdx);
+                  return (
+                    <tr key={ri} className={rowHasBadPhone ? 'preview-row-flagged' : undefined}>
+                      {headers.map((_, ci) => (
+                        <td key={ci} className={cellClass(ci)}>
+                          <span
+                            className={
+                              phoneBad(row[ci], ci) ? 'preview-bad-value' : undefined
+                            }
+                            title={phoneBad(row[ci], ci) ? 'Invalid phone number — this row will be flagged' : undefined}
+                          >
+                            {String(row[ci] != null && row[ci] !== '' ? row[ci] : '—')}
+                          </span>
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {rows.length > preview.length && (
+            <p className="preview-caption">
+              …and {rows.length - preview.length} more row{rows.length - preview.length === 1 ? '' : 's'} in the file.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="mapper-custom">
         <div className="mapper-custom-head">
@@ -178,12 +288,7 @@ export default function ColumnMapper({
               value={row.field}
               onChange={(e) => setCustomRow(idx, { field: e.target.value })}
             />
-            <ColumnSelect
-              headers={known ? headers : null}
-              value={row.col}
-              onChange={(v) => setCustomRow(idx, { col: v })}
-              required={false}
-            />
+            <HeaderSelect headers={headers} value={row.col} onChange={(v) => setCustomRow(idx, { col: v })} />
             <button
               type="button"
               className="icon-btn"
@@ -195,18 +300,6 @@ export default function ColumnMapper({
           </div>
         ))}
       </div>
-
-      <label className="check-row">
-        <input
-          type="checkbox"
-          checked={consentDefault}
-          onChange={(e) => onConsentDefaultChange(e.target.checked)}
-        />
-        <span>
-          Treat contacts as having consent if the file has no consent column or a row is blank
-          <span className="hint"> (required for compliance — leave unchecked if unsure)</span>
-        </span>
-      </label>
     </div>
   );
 }
