@@ -74,9 +74,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         calls,
         campaigns,
         contacts,
+        devtools,
         domain_configs,
         export,
         internal,
+        playground,
         test_call,
         twilio,
     )
@@ -84,6 +86,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fast_app.include_router(auth.router)
     fast_app.include_router(agents.router)
     fast_app.include_router(agents.agent_versions_router)
+    fast_app.include_router(playground.router)
+    # Dev-only endpoints (removed in production builds).
+    fast_app.include_router(devtools.router)
     fast_app.include_router(campaigns.router)
     fast_app.include_router(calls.router)
     fast_app.include_router(contacts.router)
@@ -104,13 +109,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.basicConfig(level=app_settings.log_level.upper())
 
-        # Sync /domain-configs/*.json into the legacy table (best effort).
-        from app.domain_config_service import sync_domain_configs
+        # Sync /domain-configs/*.json into the legacy table (best effort; only
+        # when the schema exists).
+        if schema_ready(session_factory):
+            from app.domain_config_service import sync_domain_configs
 
-        try:
-            sync_domain_configs(session_factory(), app_settings.domain_configs_dir)
-        except Exception:  # noqa: BLE001 — never block startup on config sync
-            logger.exception("domain config sync failed at startup")
+            try:
+                sync_domain_configs(session_factory(), app_settings.domain_configs_dir)
+            except Exception:  # noqa: BLE001 — never block startup on config sync
+                logger.exception("domain config sync failed at startup")
+        else:
+            logger.info("schema not ready at startup — skipping domain config sync")
 
         if not app_settings.internal_api_token:
             logger.warning(
@@ -151,6 +160,17 @@ def db_ping(session_factory: sessionmaker) -> bool:
             db.execute(text("SELECT 1"))
         return True
     except Exception:  # noqa: BLE001 — health checks must never raise
+        return False
+
+
+def schema_ready(session_factory: sessionmaker) -> bool:
+    """True when the core tables exist (migrations applied / create_all run)."""
+    try:
+        from sqlalchemy import inspect
+
+        inspector = inspect(session_factory.kw["bind"])
+        return inspector.has_table("domain_configs")
+    except Exception:  # noqa: BLE001 — readiness probes never raise
         return False
 
 

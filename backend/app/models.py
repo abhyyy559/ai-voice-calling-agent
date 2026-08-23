@@ -184,15 +184,21 @@ class DomainConfig(Base):
 
 
 class Campaign(Base):
-    """A calling campaign: contacts + domain config + schedule."""
+    """A calling campaign: contacts + agent version + schedule.
+
+    ``agent_version_id`` pins the immutable agent config a campaign runs;
+    legacy ``domain_config_id`` stays read-only for pre-existing data.
+    """
 
     __tablename__ = "campaigns"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     domain_config_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("domain_configs.id"), nullable=True
     )
+    agent_version_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     schedule_window_start: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     schedule_window_end: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -213,6 +219,7 @@ class Contact(Base):
     __table_args__ = (Index("ix_contacts_campaign_status", "campaign_id", "status"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     campaign_id: Mapped[int] = mapped_column(
         ForeignKey("campaigns.id"), nullable=False, index=True
     )
@@ -237,17 +244,29 @@ class Contact(Base):
 
 
 class Call(Base):
-    """An outbound call attempt against a contact."""
+    """An outbound call attempt against a contact.
+
+    Enterprise delta (spec §3): ``kind`` distinguishes real phone calls from
+    in-browser playground sessions; playground rows have NULL campaign/contact
+    and carry ``org_id`` + ``agent_version_id`` directly.
+    """
 
     __tablename__ = "calls"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    campaign_id: Mapped[int] = mapped_column(
-        ForeignKey("campaigns.id"), nullable=False, index=True
+    campaign_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("campaigns.id"), nullable=True, index=True
     )
-    contact_id: Mapped[int] = mapped_column(
-        ForeignKey("contacts.id"), nullable=False, index=True
+    contact_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("contacts.id"), nullable=True, index=True
     )
+    kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="phone", server_default="phone"
+    )
+    # Denormalized tenancy column (spec §3) — playground calls have no campaign
+    # lineage to inherit an org from.
+    org_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    agent_version_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     provider_call_id: Mapped[Optional[str]] = mapped_column(
         String(64), unique=True, nullable=True, index=True
     )
@@ -295,7 +314,11 @@ class CallEvent(Base):
 
 
 class Transcript(Base):
-    """One conversational turn of a call."""
+    """One conversational turn of a call.
+
+    Latency columns (NFR-1, logged from day one) are per-turn pipeline
+    timings reported by the voice-agent worker via the internal API.
+    """
 
     __tablename__ = "transcripts"
     __table_args__ = (Index("ix_transcripts_call_turn", "call_id", "turn_index"),)
@@ -306,6 +329,10 @@ class Transcript(Base):
     speaker: Mapped[str] = mapped_column(String(10), nullable=False)  # agent | caller
     text: Mapped[str] = mapped_column(Text, nullable=False)
     timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    stt_final_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    llm_first_token_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tts_first_audio_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    e2e_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     call: Mapped[Call] = relationship(back_populates="transcripts")
 
