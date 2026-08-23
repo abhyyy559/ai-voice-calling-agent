@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+import pydantic
 import pytest
 
 from _qa_contract import (
@@ -63,7 +64,7 @@ def test_invalid_extraction_field_type_rejected_with_field_message() -> None:
         "validation": "optional",
         "confidence_threshold": 0.7,
     }
-    with pytest.raises(schema.DomainConfig.ValidationError) as excinfo:
+    with pytest.raises(pydantic.ValidationError) as excinfo:
         schema.validate_domain_config(config)
     locs = [loc for loc, _msg in _errors(excinfo.value)]
     assert any("extraction_schema" in map(str, loc) or "bad_field" in map(str, loc) for loc in locs), (
@@ -75,7 +76,7 @@ def test_confidence_threshold_out_of_range_rejected() -> None:
     schema = _load_validator()
     config = _valid_config()
     config["extraction_schema"]["reason_for_absence"]["confidence_threshold"] = 1.5
-    with pytest.raises(schema.DomainConfig.ValidationError) as excinfo:
+    with pytest.raises(pydantic.ValidationError) as excinfo:
         schema.validate_domain_config(config)
     flat = " | ".join(f"{loc} {msg}" for loc, msg in _errors(excinfo.value))
     assert "confidence" in flat.lower(), f"error should mention confidence_threshold, got: {flat}"
@@ -85,7 +86,7 @@ def test_empty_question_flow_rejected() -> None:
     schema = _load_validator()
     config = _valid_config()
     config["question_flow"] = []
-    with pytest.raises(schema.DomainConfig.ValidationError) as excinfo:
+    with pytest.raises(pydantic.ValidationError) as excinfo:
         schema.validate_domain_config(config)
     locs = [loc for loc, _msg in _errors(excinfo.value)]
     assert any("question_flow" in map(str, loc) for loc in locs), (
@@ -97,7 +98,7 @@ def test_non_sequential_question_steps_rejected() -> None:
     schema = _load_validator()
     config = _valid_config()
     config["question_flow"][1]["step"] = 3
-    with pytest.raises(schema.DomainConfig.ValidationError) as excinfo:
+    with pytest.raises(pydantic.ValidationError) as excinfo:
         schema.validate_domain_config(config)
     flat = " | ".join(msg for _loc, msg in _errors(excinfo.value))
     assert "sequential" in flat.lower(), f"error should explain step ordering rule, got: {flat}"
@@ -108,7 +109,7 @@ def test_missing_disclosure_script_rejected() -> None:
     config = _valid_config()
     config.pop("mandatory_disclosure", None)
     config.pop("disclosure_script", None)
-    with pytest.raises(schema.DomainConfig.ValidationError) as excinfo:
+    with pytest.raises(pydantic.ValidationError) as excinfo:
         schema.validate_domain_config(config)
     all_loc_names = [str(part) for loc, _msg in _errors(excinfo.value) for part in loc]
     assert any("disclosure" in name for name in all_loc_names), (
