@@ -1,15 +1,16 @@
-"""Contact endpoints: list, import (CSV/XLSX), patch, delete."""
+"""Contact endpoints: list, import (CSV/XLSX), patch, delete (org-scoped)."""
 from __future__ import annotations
 
 import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import CONTACT_STATUSES, Campaign, ConsentRecord, Contact
+from app.deps import get_current_user
+from app.models import CONTACT_STATUSES, Campaign, ConsentRecord, Contact, User
 from app.schemas import ContactOut, ContactPage, ContactPatch, ImportResult
 from app.services.import_service import import_contacts, normalize_phone
 from app.timeutil import utcnow
@@ -17,9 +18,9 @@ from app.timeutil import utcnow
 router = APIRouter(prefix="/api", tags=["contacts"])
 
 
-def _get_campaign_or_404(db: Session, campaign_id: int) -> Campaign:
+def _get_campaign_or_404(db: Session, campaign_id: int, user: User) -> Campaign:
     campaign = db.get(Campaign, campaign_id)
-    if campaign is None:
+    if campaign is None or campaign.org_id != user.org_id:
         raise HTTPException(status_code=404, detail="campaign not found")
     return campaign
 
@@ -49,9 +50,10 @@ def list_contacts(
     status: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _get_campaign_or_404(db, campaign_id)
+    _get_campaign_or_404(db, campaign_id, user)
     page = max(1, page)
     page_size = min(max(1, page_size), 200)
     conditions = [Contact.campaign_id == campaign_id]
@@ -81,9 +83,10 @@ async def import_contacts_endpoint(
     file: UploadFile = File(...),
     mapping: str = Form(...),
     consent_default: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _get_campaign_or_404(db, campaign_id)
+    _get_campaign_or_404(db, campaign_id, user)
     try:
         mapping_dict = json.loads(mapping)
         if not isinstance(mapping_dict, dict):
@@ -110,16 +113,35 @@ async def import_contacts_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Backfill the denormalized org column on freshly imported rows.
+    campaign = _get_campaign_or_404(db, campaign_id, user)
+    if campaign.org_id is not None:
+        db.execute(
+            update(Contact)
+            .where(Contact.campaign_id == campaign_id, Contact.org_id.is_(None))
+            .values(org_id=campaign.org_id)
+        )
+        db.commit()
     return result
+
+
+def _get_own_contact_or_404(db: Session, contact_id: int, user: User) -> Contact:
+    """Fetch a contact and verify its campaign belongs to the caller's org."""
+    contact = db.get(Contact, contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404, detail="contact not found")
+    _get_campaign_or_404(db, contact.campaign_id, user)
+    return contact
 
 
 @router.patch("/contacts/{contact_id}", response_model=ContactOut)
 def patch_contact(
-    contact_id: int, payload: ContactPatch, db: Session = Depends(get_db)
+    contact_id: int,
+    payload: ContactPatch,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    contact = db.get(Contact, contact_id)
-    if contact is None:
-        raise HTTPException(status_code=404, detail="contact not found")
+    contact = _get_own_contact_or_404(db, contact_id, user)
     if payload.status is not None:
         if payload.status not in CONTACT_STATUSES:
             raise HTTPException(status_code=422, detail=f"invalid status: {payload.status}")
@@ -153,10 +175,12 @@ def patch_contact(
 
 
 @router.delete("/contacts/{contact_id}")
-def delete_contact(contact_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    contact = db.get(Contact, contact_id)
-    if contact is None:
-        raise HTTPException(status_code=404, detail="contact not found")
+def delete_contact(
+    contact_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contact = _get_own_contact_or_404(db, contact_id, user)
     db.delete(contact)
     db.commit()
     return {"ok": True, "id": contact_id}

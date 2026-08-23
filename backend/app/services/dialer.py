@@ -100,9 +100,16 @@ class DialerService:
             .limit(1)
         ).first()
 
-    def _place(self, db: Session, contact: Contact, campaign_id: int, now: datetime) -> None:
+    def _place(self, db: Session, contact: Contact, campaign: Campaign, now: datetime) -> None:
         """Create a call row and place it; on failure apply retry rules."""
-        call = Call(campaign_id=campaign_id, contact_id=contact.id, status="queued", started_at=now)
+        call = Call(
+            campaign_id=campaign.id,
+            contact_id=contact.id,
+            kind="phone",
+            org_id=campaign.org_id,
+            status="queued",
+            started_at=now,
+        )
         db.add(call)
         db.commit()  # persist queued call first so it counts as in-flight on failure paths
 
@@ -152,7 +159,7 @@ class DialerService:
                     in_flight < self.settings.default_concurrency_limit
                     and self._cps_slots_available(now)
                 ):
-                    if not self._process_next(db, campaign.id, now):
+                    if not self._process_next(db, campaign, now):
                         break
                     in_flight += 1
                     placed += 1
@@ -160,9 +167,9 @@ class DialerService:
                 db.commit()
         return placed
 
-    def _process_next(self, db: Session, campaign_id: int, now: datetime) -> bool:
+    def _process_next(self, db: Session, campaign: Campaign, now: datetime) -> bool:
         """Pick and dial the next eligible contact. False when nothing to do."""
-        contact = self._next_eligible_contact(db, campaign_id, now)
+        contact = self._next_eligible_contact(db, campaign.id, now)
         if contact is None:
             return False
         if not self._consent_ok(contact):
@@ -172,5 +179,5 @@ class DialerService:
             contact.status = "opted_out"
             db.commit()
             return True  # consumed a pick; loop continues to next contact
-        self._place(db, contact, campaign_id, now)
+        self._place(db, contact, campaign, now)
         return True

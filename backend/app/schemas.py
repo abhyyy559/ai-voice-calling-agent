@@ -26,15 +26,19 @@ class DomainConfigSyncOut(BaseModel):
 
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    domain_config_id: int
+    # Legacy read-only path (pre-platform data). New campaigns pin agent_version_id.
+    domain_config_id: Optional[int] = None
+    agent_version_id: Optional[int] = None
 
 
 class CampaignOut(BaseModel):
     id: int
     name: str
     status: str
+    org_id: Optional[int] = None
     domain_config_id: Optional[int]
     domain_config_name: Optional[str] = None
+    agent_version_id: Optional[int] = None
     schedule_window_start: Optional[datetime] = None
     schedule_window_end: Optional[datetime] = None
     created_at: Optional[datetime] = None
@@ -58,8 +62,10 @@ class CampaignListItem(BaseModel):
     id: int
     name: str
     status: str
+    org_id: Optional[int] = None
     domain_config_id: Optional[int]
     domain_config_name: Optional[str] = None
+    agent_version_id: Optional[int] = None
     counts: ContactCounts
     created_at: Optional[datetime] = None
 

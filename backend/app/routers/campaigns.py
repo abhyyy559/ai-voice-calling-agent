@@ -1,14 +1,15 @@
-"""Campaign management endpoints (admin API, /api/campaigns)."""
+"""Campaign management endpoints (/api/campaigns, org-scoped per contract §4)."""
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Campaign, Call, Contact, DomainConfig
+from app.deps import get_current_user
+from app.models import Agent, AgentVersion, Campaign, Call, Contact, DomainConfig, User
 from app.schemas import CampaignCreate, CampaignDetail, CampaignListItem, CampaignOut
 from app.services.calls_service import in_flight_call_count
 from app.timeutil import is_within_calling_hours, utcnow
@@ -38,9 +39,10 @@ def _contact_counts(db: Session, campaign_id: int) -> dict[str, int]:
     }
 
 
-def _get_campaign_or_404(db: Session, campaign_id: int) -> Campaign:
+def _get_campaign_or_404(db: Session, campaign_id: int, user: User) -> Campaign:
+    """Org-scoped fetch: foreign-org campaigns return 404 (existence-leak guard)."""
     campaign = db.get(Campaign, campaign_id)
-    if campaign is None:
+    if campaign is None or campaign.org_id != user.org_id:
         raise HTTPException(status_code=404, detail="campaign not found")
     return campaign
 
@@ -53,10 +55,12 @@ def _campaign_out(db: Session, campaign: Campaign) -> dict[str, Any]:
     )
     return {
         "id": campaign.id,
+        "org_id": campaign.org_id,
         "name": campaign.name,
         "status": campaign.status,
         "domain_config_id": campaign.domain_config_id,
         "domain_config_name": domain_config.name if domain_config else None,
+        "agent_version_id": campaign.agent_version_id,
         "schedule_window_start": campaign.schedule_window_start,
         "schedule_window_end": campaign.schedule_window_end,
         "created_at": campaign.created_at,
@@ -72,8 +76,14 @@ def consent_ok(db: Session, contact: Contact, settings) -> bool:
 
 
 @router.get("", response_model=list[CampaignListItem])
-def list_campaigns(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    campaigns = db.scalars(select(Campaign).order_by(Campaign.id.desc())).all()
+def list_campaigns(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> list[dict[str, Any]]:
+    campaigns = db.scalars(
+        select(Campaign)
+        .where(Campaign.org_id == user.org_id)
+        .order_by(Campaign.id.desc())
+    ).all()
     items: list[dict[str, Any]] = []
     for campaign in campaigns:
         base = _campaign_out(db, campaign)
@@ -84,11 +94,30 @@ def list_campaigns(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 
 @router.post("", response_model=CampaignOut, status_code=201)
 def create_campaign(
-    payload: CampaignCreate, db: Session = Depends(get_db)
+    payload: CampaignCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if db.get(DomainConfig, payload.domain_config_id) is None:
+    if payload.domain_config_id and db.get(DomainConfig, payload.domain_config_id) is None:
         raise HTTPException(status_code=422, detail="unknown domain_config_id")
-    campaign = Campaign(name=payload.name, domain_config_id=payload.domain_config_id, status="draft")
+    agent_version_id: Optional[int] = payload.agent_version_id
+    if agent_version_id is not None:
+        version = db.get(AgentVersion, agent_version_id)
+        # Foreign-org versions must be indistinguishable from missing ones.
+        parent_agent = (
+            db.get(Agent, version.agent_id)
+            if version is not None
+            else None
+        )
+        if version is None or parent_agent is None or parent_agent.org_id != user.org_id:
+            raise HTTPException(status_code=404, detail="agent version not found")
+    campaign = Campaign(
+        name=payload.name,
+        domain_config_id=payload.domain_config_id,
+        agent_version_id=agent_version_id,
+        org_id=user.org_id,
+        status="draft",
+    )
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
@@ -96,8 +125,12 @@ def create_campaign(
 
 
 @router.get("/{campaign_id}", response_model=CampaignDetail)
-def get_campaign(campaign_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    campaign = _get_campaign_or_404(db, campaign_id)
+def get_campaign(
+    campaign_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    campaign = _get_campaign_or_404(db, campaign_id, user)
     out = _campaign_out(db, campaign)
     out["counts"] = _contact_counts(db, campaign.id)
     return out
@@ -105,9 +138,12 @@ def get_campaign(campaign_id: int, db: Session = Depends(get_db)) -> dict[str, A
 
 @router.post("/{campaign_id}/launch", response_model=CampaignOut)
 def launch_campaign(
-    campaign_id: int, request: Request, db: Session = Depends(get_db)
+    campaign_id: int,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    campaign = _get_campaign_or_404(db, campaign_id)
+    campaign = _get_campaign_or_404(db, campaign_id, user)
     settings = request.app.state.settings
     if campaign.status == "running":
         raise HTTPException(status_code=422, detail="campaign is already running")
@@ -149,8 +185,12 @@ def launch_campaign(
 
 
 @router.post("/{campaign_id}/pause", response_model=CampaignOut)
-def pause_campaign(campaign_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    campaign = _get_campaign_or_404(db, campaign_id)
+def pause_campaign(
+    campaign_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    campaign = _get_campaign_or_404(db, campaign_id, user)
     if campaign.status != "running":
         raise HTTPException(status_code=422, detail=f"cannot pause a {campaign.status} campaign")
     campaign.status = "paused"
@@ -160,8 +200,12 @@ def pause_campaign(campaign_id: int, db: Session = Depends(get_db)) -> dict[str,
 
 
 @router.post("/{campaign_id}/cancel", response_model=CampaignOut)
-def cancel_campaign(campaign_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    campaign = _get_campaign_or_404(db, campaign_id)
+def cancel_campaign(
+    campaign_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    campaign = _get_campaign_or_404(db, campaign_id, user)
     if campaign.status in ("completed", "canceled"):
         raise HTTPException(status_code=422, detail=f"campaign is already {campaign.status}")
     campaign.status = "canceled"
@@ -171,8 +215,12 @@ def cancel_campaign(campaign_id: int, db: Session = Depends(get_db)) -> dict[str
 
 
 @router.get("/{campaign_id}/dashboard")
-def campaign_dashboard(campaign_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    campaign = _get_campaign_or_404(db, campaign_id)
+def campaign_dashboard(
+    campaign_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    campaign = _get_campaign_or_404(db, campaign_id, user)
     recent_calls = db.execute(
         select(Call, Contact.name, Contact.phone)
         .join(Contact, Contact.id == Call.contact_id)
