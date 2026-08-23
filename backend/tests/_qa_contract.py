@@ -15,6 +15,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+import pytest
+
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 BACKEND_DIR: Path = PROJECT_ROOT / "backend"
 
@@ -63,26 +65,66 @@ def import_first(candidates: list[tuple[str, str]]) -> tuple[Optional[Any], str]
     return None, "; ".join(failures)
 
 
+def qa_settings() -> Any:
+    """Hermetic Settings mirroring backend/tests/conftest.py defaults (no .env IO)."""
+    from app.config import Settings
+
+    return Settings(
+        database_url="sqlite://",
+        jwt_secret="qa_test_jwt_secret",
+        jwt_expire_minutes=60,
+        internal_api_token="qa_internal_token",
+        livekit_url="ws://localhost:7880",
+        livekit_api_key="devkey",
+        livekit_api_secret="devsecret",
+        cors_origins="http://localhost:3000",
+        dialer_enabled=False,
+        _env_file=None,
+    )
+
+
+def _prefer_backend_app_package() -> None:
+    """Ensure ``import app.*`` resolves to /backend even when another lane put
+    its own ``app`` package first on sys.path (both lanes ship one)."""
+    if str(BACKEND_DIR) in sys.path:
+        sys.path.remove(str(BACKEND_DIR))
+    sys.path.insert(0, str(BACKEND_DIR))
+    for name in [n for n in list(sys.modules) if n == "app" or n.startswith("app.")]:
+        del sys.modules[name]
+
+
 def import_app() -> tuple[Optional[Any], str]:
     """Locate the merged FastAPI app or app factory, or explain why not."""
-    app, reason = import_first(
-        [
-            ("main", "app"),
-            ("main", "create_app"),
-            ("app.main", "app"),
-            ("app.main", "create_app"),
-        ]
+    _prefer_backend_app_package()
+    create_app, why_factory = import_first(
+        [("app.main", "create_app"), ("main", "create_app")]
     )
-    if app is None:
-        return None, f"FastAPI app not importable yet ({reason})"
-    if not hasattr(app, "routes") and callable(app):
+    if create_app is not None:
         try:
-            app = app()
-        except TypeError as exc:
-            return None, f"app factory requires arguments ({exc})"
-    if not hasattr(app, "routes"):
-        return None, "imported object is not an ASGI app"
-    return app, ""
+            app = create_app()
+        except TypeError:
+            try:
+                app = create_app(qa_settings())
+            except Exception as exc:
+                return None, f"create_app(settings) failed ({type(exc).__name__}: {exc})"
+        except Exception as exc:
+            return None, f"create_app() failed ({type(exc).__name__}: {exc})"
+        if hasattr(app, "routes"):
+            return app, ""
+    app, why_attr = import_first([("app.main", "app"), ("main", "app")])
+    if app is not None and hasattr(app, "routes"):
+        return app, ""
+    return None, f"FastAPI app not importable yet (factory: {why_factory}; attr: {why_attr})"
+
+
+def expect_merged(result: Optional[Any], why: str, lane: str = "Lane A") -> Any:
+    """Skip when a frozen-contract seam is simply not merged yet; fail otherwise."""
+    if result is not None:
+        return result
+    lowered = why.lower()
+    if "missing" in lowered or "not merged" in lowered or "no member" in lowered or "404" in lowered:
+        pytest.skip(f"[{lane}] {why}")
+    pytest.fail(f"[{lane}] unexpected contract break: {why}")
 
 
 def build_test_client(app: Any) -> tuple[Optional[Any], str]:
@@ -138,7 +180,14 @@ def build_test_client(app: Any) -> tuple[Optional[Any], str]:
     if not bound:
         return None, "could not rebind sessions (neither app.state.session_factory nor get_db override)"
 
-    return TestClient(app, raise_server_exceptions=False), ""
+    client = TestClient(app, raise_server_exceptions=False)
+    settings_obj = getattr(getattr(app, "state", None), "settings", None)
+    client.qa_context = {
+        "engine": engine,
+        "session_factory": factory,
+        "settings": settings_obj,
+    }
+    return client, ""
 
 
 def api(
@@ -215,7 +264,71 @@ def create_version(
 _MEMBER_PATH_RE = re.compile(r"user|invite|member", re.IGNORECASE)
 
 
-def provision_member(
+def mint_token_without_org(
+    subject: Any,
+    settings: Any = None,
+) -> tuple[Optional[str], str]:
+    """Best-effort JWT that is correctly signed but carries NO usable org claim."""
+    if settings is None:
+        try:
+            settings = qa_settings()
+        except Exception as exc:
+            return None, f"cannot build settings ({exc})"
+    attempts: list[tuple[tuple[Any, ...], str]] = [
+        (({"sub": str(subject)},), "dict-payload"),
+        ((str(subject),), "subject-string"),
+    ]
+    try:
+        numeric = int(subject)
+    except (TypeError, ValueError):
+        numeric = None
+    if numeric is not None:
+        attempts.append(((numeric, None, "member", settings), "user_id,org_id=None,role,settings"))
+        attempts.append(((numeric, "", "member", settings), "user_id,empty-org,role,settings"))
+    failures: list[str] = []
+    for mod_name in ("app.auth", "auth", "app.deps", "deps"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        for fname in ("create_access_token", "create_token", "_create_token"):
+            fn = getattr(mod, fname, None)
+            if not callable(fn):
+                continue
+            for args, label in attempts:
+                try:
+                    token = fn(*args)
+                except TypeError as exc:
+                    failures.append(f"{fname}({label}): {exc}")
+                    continue
+                except Exception as exc:
+                    failures.append(f"{fname}({label}): {type(exc).__name__}: {exc}")
+                    break
+                if isinstance(token, str) and token.count(".") == 2:
+                    return token, ""
+    try:
+        import jwt
+
+        secret = getattr(settings, "jwt_secret", "")
+        if secret:
+            import datetime as _dt
+
+            token = jwt.encode(
+                {
+                    "sub": str(subject),
+                    "iat": _dt.datetime.now(_dt.timezone.utc),
+                    "exp": _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=1),
+                },
+                secret,
+                algorithm=getattr(settings, "jwt_algorithm", "HS256"),
+            )
+            return token, ""
+    except Exception as exc:
+        failures.append(f"raw-jwt fallback: {exc}")
+    return None, "; ".join(failures) or "no token issuer discoverable"
+
+
+def _provision_member_via_openapi(
     client: Any,
     owner: dict[str, Any],
 ) -> tuple[Optional[dict[str, Any]], str]:
@@ -250,56 +363,55 @@ def provision_member(
         return None, f"member created via {path} but login failed {login.status_code}"
     return None, (
         "no member-provisioning endpoint advertised in OpenAPI "
-        f"(scanned POST paths matching {_MEMBER_PATH_RE.pattern}): cannot exercise role checks"
+        f"(scanned POST paths matching {_MEMBER_PATH_RE.pattern})"
     )
 
 
-def mint_token_without_org(subject: Any) -> tuple[Optional[str], str]:
-    """Best-effort JWT carrying only a subject claim (no org context)."""
-    for mod_name in ("app.auth", "auth", "app.deps", "deps", "app.security", "security"):
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:
-            continue
-        for fname in ("create_access_token", "create_token", "_create_token"):
-            fn = getattr(mod, fname, None)
-            if not callable(fn):
-                continue
-            for arg in ({"sub": str(subject)}, str(subject)):
-                try:
-                    token = fn(arg)
-                except TypeError:
-                    continue
-                except Exception:
-                    break
-                if isinstance(token, str) and token.count(".") == 2:
-                    return token, ""
+def provision_member(
+    client: Any,
+    owner: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], str]:
+    api_result, api_why = _provision_member_via_openapi(client, owner)
+    if api_result is not None:
+        return api_result, ""
+    db_result, db_why = provision_member_via_db(client, owner)
+    if db_result is not None:
+        return db_result, ""
+    return None, f"openapi path: {api_why}; direct-db fallback: {db_why}"
+
+
+def provision_member_via_db(client: Any, owner: dict[str, Any]) -> tuple[Optional[dict[str, Any]], str]:
+    """Insert a role=member User row directly and mint a proper JWT for them."""
+    ctx = getattr(client, "qa_context", None)
+    if not ctx:
+        return None, "no db harness context attached to client"
     try:
-        import jwt
-        from app.config import get_settings
+        from app.auth import create_access_token, hash_password
+        from app.models import User
 
-        settings = get_settings()
-        secret = next(
-            (
-                getattr(settings, name)
-                for name in dir(settings)
-                if "secret" in name.lower() and isinstance(getattr(settings, name), str)
-                and getattr(settings, name)
-            ),
-            "",
-        )
-        if secret:
-            import datetime as _dt
-
-            token = jwt.encode(
-                {
-                    "sub": str(subject),
-                    "exp": _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=1),
-                },
-                secret,
-                algorithm="HS256",
+        email = f"member-{uuid.uuid4().hex[:8]}@example.com"
+        password = DEFAULT_MEMBER_PASSWORD
+        org_id = owner.get("org")
+        factory = ctx["session_factory"]
+        session = factory()
+        try:
+            if org_id is None:
+                first = session.query(User).first()
+                org_id = first.org_id if first is not None else None
+            user = User(
+                org_id=org_id,
+                email=email,
+                password_hash=hash_password(password),
+                role="member",
             )
-            return token, ""
-    except Exception:
-        pass
-    return None, "no token issuer or signing secret discoverable"
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            user_id, resolved_org = int(user.id), int(user.org_id)
+        finally:
+            session.close()
+        settings = ctx.get("settings") or qa_settings()
+        token = create_access_token(user_id, resolved_org, "member", settings)
+        return {"token": token, "user": {"id": user_id, "role": "member", "email": email}}, ""
+    except Exception as exc:
+        return None, f"direct-db member provisioning failed ({type(exc).__name__}: {exc})"

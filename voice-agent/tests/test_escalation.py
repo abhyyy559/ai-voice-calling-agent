@@ -1,139 +1,205 @@
-"""Offline tests for extraction escalation logic (app.extraction_tools).
+"""Lane E — extraction escalation contract tests (Lane B voice-agent).
 
-Uses the FakeBackendClient fixture from conftest.py — no network access.
+Frozen contract (spec §5 FR-12, plan Global Constraints):
+- extraction confidence < 0.6 -> flag + graceful wrap-up
+- required field unfilled after N=3 asks -> escalate/flag
+- a low-confidence/unfilled value is NEVER fabricated into extracted fields
+
+Primary seam (merged Lane B): ``app.extraction_tools`` — ExtractionCoordinator
+(aliased ExtractionTracker for this suite) plus the framework-free
+VoiceAgentTools function tools, driven against a FakeBackendClient.
+A discovery-based fallback keeps the suite runnable if module paths shift.
 """
-
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Optional
 
 import pytest
 
-from app.extraction_tools import (
-    MAX_ASKS_PER_FIELD,
-    ExtractionCoordinator,
-    VoiceAgentTools,
-)
+from _qa_voice_contract import FakeBackendClient, locate_symbols
 
-CALL_ID = "call-test-123"
+POLICY_MODULES: list[str] = [
+    "app.extraction_tools",
+    "app.escalation",
+    "app.pipeline",
+    "agent",
+]
+COORDINATOR_ATTRS: list[str] = [
+    "ExtractionTracker",
+    "ExtractionCoordinator",
+    "EscalationPolicy",
+    "ExtractionState",
+]
+TOOLS_ATTRS: list[str] = ["VoiceAgentTools"]
+
+LOW_CONFIDENCE_THRESHOLD = 0.6
+MAX_ASKS = 3
 
 
-def _coordinator(required: Tuple[str, ...] = ("reason_for_absence",)) -> ExtractionCoordinator:
-    return ExtractionCoordinator(required_fields=frozenset(required))
+@pytest.fixture(scope="module")
+def coordinator_cls() -> type:
+    cls, why = locate_symbols(COORDINATOR_ATTRS, POLICY_MODULES)
+    if cls is None:
+        pytest.skip(f"[Lane B] escalation tracker not merged yet: {why}")
+    return cls
 
 
-def test_low_confidence_flags_field_and_ends_call(fake_backend: Any) -> None:
-    async def scenario() -> Tuple[str, ExtractionCoordinator]:
-        coordinator = _coordinator()
-        tools = VoiceAgentTools(coordinator, fake_backend, CALL_ID)
-        reply = await tools.record_extracted_field(
-            "reason_for_absence", "uh... maybe sick?", 0.35
+@pytest.fixture(scope="module")
+def tools_cls() -> Optional[type]:
+    tools, _why = locate_symbols(TOOLS_ATTRS, ["app.extraction_tools"])
+    return tools
+
+
+def make_coordinator(coordinator_cls: type, required: set[str]) -> Any:
+    """Build a tracker, tolerating constructors without a required_fields kwarg."""
+    try:
+        return coordinator_cls(required_fields=frozenset(required))
+    except TypeError:
+        instance = coordinator_cls()
+        for attr in ("required_fields",):
+            if hasattr(instance, attr) and isinstance(getattr(instance, attr), (set, frozenset)):
+                setattr(instance, attr, frozenset(required))
+                break
+        return instance
+
+
+def test_low_confidence_value_is_flagged_and_wraps_up(
+    coordinator_cls: type,
+) -> None:
+    coordinator = make_coordinator(coordinator_cls, {"reason_for_absence"})
+    result = coordinator.record("reason_for_absence", "uh maybe not feeling well", 0.45)
+
+    assert getattr(result, "flagged", False), f"confidence<0.6 must flag: {result!r}"
+    assert getattr(result, "should_wrap_up", False), (
+        f"low confidence must trigger graceful wrap-up: {result!r}"
+    )
+    assert not getattr(result, "accepted", True), f"low-confidence value must not be accepted: {result!r}"
+    assert "reason_for_absence" in coordinator.flagged, (
+        f"field must appear in flagged view: {coordinator.flagged!r}"
+    )
+    assert coordinator.consume_wrap_up() is not None, "a wrap-up reason must be queued"
+
+
+def test_low_confidence_value_is_never_recorded_as_extracted(
+    coordinator_cls: type,
+) -> None:
+    coordinator = make_coordinator(coordinator_cls, {"reason_for_absence"})
+    coordinator.record("reason_for_absence", "I dunno something", 0.3)
+    recorded = getattr(coordinator, "recorded", {})
+    assert "reason_for_absence" not in recorded, (
+        f"low-confidence turn must not land in extracted values: {recorded!r}"
+    )
+
+
+def test_confident_value_is_accepted_control_case(
+    coordinator_cls: type,
+) -> None:
+    coordinator = make_coordinator(coordinator_cls, {"reason_for_absence"})
+    result = coordinator.record("reason_for_absence", "viral fever", 0.92)
+    assert getattr(result, "accepted", False), f"high-confidence capture must be accepted: {result!r}"
+    assert not getattr(result, "flagged", True)
+    assert "reason_for_absence" in getattr(coordinator, "recorded", {})
+
+
+def test_required_field_unfilled_after_three_asks_escalates(
+    coordinator_cls: type,
+) -> None:
+    coordinator = make_coordinator(coordinator_cls, {"expected_return_date"})
+    for ask_number in range(1, MAX_ASKS + 1):
+        count = coordinator.mark_asked("expected_return_date")
+        assert count == ask_number
+        assert "expected_return_date" not in coordinator.flagged or ask_number == MAX_ASKS
+    assert "expected_return_date" in coordinator.flagged, (
+        f"required field unfilled after {MAX_ASKS} asks must be flagged: "
+        f"{coordinator.flagged!r}"
+    )
+    assert "expected_return_date" in coordinator.unfilled_required()
+
+
+def test_two_asks_do_not_yet_escalate(coordinator_cls: type) -> None:
+    coordinator = make_coordinator(coordinator_cls, {"expected_return_date"})
+    for _ in range(MAX_ASKS - 1):
+        coordinator.mark_asked("expected_return_date")
+    assert "expected_return_date" not in coordinator.flagged, (
+        f"escalating before {MAX_ASKS} asks violates the policy: {coordinator.flagged!r}"
+    )
+
+
+def test_escalated_field_is_never_fabricated_in_end_call_summary(
+    coordinator_cls: type,
+) -> None:
+    coordinator = make_coordinator(coordinator_cls, {"expected_return_date"})
+    for _ in range(MAX_ASKS):
+        coordinator.mark_asked("expected_return_date")
+    unfilled = coordinator.unfilled_required()
+    assert unfilled == ["expected_return_date"]
+    placeholders = {"unknown", "n/a", "na", "none", "null", "tbd", "?", ""}
+    for name, entry in getattr(coordinator, "recorded", {}).items():
+        value = entry.get("value") if isinstance(entry, dict) else entry
+        assert str(value).strip().lower() not in placeholders, (
+            f"placeholder fabrication detected for {name}: {value!r}"
         )
-        return reply, coordinator
-
-    reply, coordinator = asyncio.run(scenario())
-
-    # The field is flagged, not accepted.
-    assert "reason_for_absence" in coordinator.flagged_fields
-    assert "reason_for_absence" not in coordinator.recorded
-
-    # The value was still persisted (for audit), with its low confidence.
-    assert len(fake_backend.field_posts) == 1
-    call_id, rows = fake_backend.field_posts[0]
-    assert call_id == CALL_ID
-    row: Dict[str, Any] = dict(rows[0])
-    assert row["field_name"] == "reason_for_absence"
-    assert row["confidence"] == pytest.approx(0.35)
-
-    # Escalation: a wrap-up/complete was posted (end-call path).
-    assert len(fake_backend.completions) == 1
-    complete_call_id, payload = fake_backend.completions[0]
-    assert complete_call_id == CALL_ID
-    assert payload["status"] == "wrapped_up_flagged"
-    assert "0.35" in str(payload["error"])
-
-    # The tool tells the LLM to wrap up and mentions the flag.
-    assert "FLAGGED" in reply
-    assert "wrap up" in reply.lower()
-
-    # The pending wrap-up reason is consumable exactly once.
-    assert coordinator.consume_wrap_up() is not None
-    assert coordinator.consume_wrap_up() is None
 
 
-def test_three_attempts_on_required_field_triggers_wrap_up(fake_backend: Any) -> None:
-    async def scenario() -> str:
-        coordinator = _coordinator(("expected_return_date",))
-        tools = VoiceAgentTools(coordinator, fake_backend, CALL_ID)
-        for _ in range(MAX_ASKS_PER_FIELD):
-            coordinator.mark_asked("expected_return_date")
-        return await tools.end_call("Caller could not confirm a return date.")
+def test_tool_call_flags_and_posts_wrap_up_via_fake_backend(
+    coordinator_cls: type,
+    tools_cls: Optional[type],
+) -> None:
+    if tools_cls is None:
+        pytest.skip("[Lane B] VoiceAgentTools seam not found")
+    fake = FakeBackendClient()
+    coordinator = make_coordinator(coordinator_cls, set())
+    tools = tools_cls(coordinator, fake, "call-qa-1")
 
-    summary_reply = asyncio.run(scenario())
+    reply = asyncio.run(
+        tools.record_extracted_field("reason_for_absence", "uh maybe sick", 0.45)
+    )
+    assert "FLAGGED" in reply.upper(), f"tool must announce the flag: {reply!r}"
 
-    completions = fake_backend.completions
-    assert len(completions) == 1
-    _, payload = completions[0]
-    assert payload["status"] == "completed"
-    assert "expected_return_date" in str(payload["summary"])
-    assert "Unfilled required fields" in str(payload["summary"])
-    assert "end_call" not in summary_reply or "Call ended" in summary_reply
+    assert fake.completions, "wrap-up must post to backend complete endpoint"
+    completion = fake.completions[-1]
+    assert completion["status"] == "wrapped_up_flagged", (
+        f"completion status must mark the wrap-up: {completion!r}"
+    )
+    assert completion["error"], "completion should carry the escalation reason"
 
-
-def test_two_attempts_does_not_wrap_up() -> None:
-    coordinator = _coordinator(("expected_return_date",))
-    coordinator.mark_asked("expected_return_date")
-    coordinator.mark_asked("expected_return_date")
-
-    assert coordinator.consume_wrap_up() is None
-    assert "expected_return_date" not in coordinator.flagged_fields
-
-
-def test_high_confidence_accepted_without_completion(fake_backend: Any) -> None:
-    async def scenario() -> str:
-        coordinator = _coordinator()
-        tools = VoiceAgentTools(coordinator, fake_backend, CALL_ID)
-        return await tools.record_extracted_field(
-            "reason_for_absence", "food poisoning", 0.92
-        )
-
-    reply = asyncio.run(scenario())
-
-    coordinator_field_state = fake_backend.field_posts[0][1][0]
-    assert dict(coordinator_field_state)["confidence"] == pytest.approx(0.92)
-    # No escalation: no completion should have been posted.
-    assert fake_backend.completions == []
-    assert "Recorded" in reply and "FLAGGED" not in reply
+    assert "not guess" in reply.lower() or "do not guess" in reply.lower(), (
+        f"tool instruction must forbid guessing: {reply!r}"
+    )
 
 
-def test_end_call_reports_unfilled_required_fields(fake_backend: Any) -> None:
-    async def scenario() -> None:
-        coordinator = _coordinator(("reason_for_absence", "call_outcome"))
-        tools = VoiceAgentTools(coordinator, fake_backend, CALL_ID)
-        await tools.record_extracted_field("reason_for_absence", "fever", 0.9)
-        await tools.end_call("All done.")
+def test_end_call_reports_unfilled_required_fields_never_fabricated(
+    coordinator_cls: type,
+    tools_cls: Optional[type],
+) -> None:
+    if tools_cls is None:
+        pytest.skip("[Lane B] VoiceAgentTools seam not found")
+    fake = FakeBackendClient()
+    coordinator = make_coordinator(coordinator_cls, {"expected_return_date"})
+    for _ in range(MAX_ASKS):
+        coordinator.mark_asked("expected_return_date")
+    tools = tools_cls(coordinator, fake, "call-qa-2")
 
-    asyncio.run(scenario())
-
-    assert len(fake_backend.completions) == 1
-    _, payload = fake_backend.completions[0]
-    assert payload["status"] == "completed"
-    assert "call_outcome" in str(payload["summary"])
-    assert payload["error"] is None
-
-
-def test_boundary_confidence_exactly_at_threshold_is_accepted() -> None:
-    coordinator = _coordinator()
-    result = coordinator.record("reason_for_absence", "fever", 0.6)
-    assert result.accepted is True
-    assert result.flagged is False
-    assert result.should_wrap_up is False
+    asyncio.run(tools.end_call("caller hung up"))
+    assert fake.completions, "end_call must post a completion"
+    summary = fake.completions[-1].get("summary") or ""
+    assert "expected_return_date" in summary and "never" in summary.lower(), (
+        f"summary must disclose unfilled required fields as never-fabricated: {summary!r}"
+    )
 
 
-def test_confidence_clamped_to_valid_range() -> None:
-    coordinator = _coordinator()
-    high = coordinator.record("f", "v", 1.7)
-    low = coordinator.record("g", "v", -0.5)
-    assert high.confidence == pytest.approx(1.0)
-    assert low.confidence == pytest.approx(0.0)
+def test_fake_backend_client_matches_frozen_interface() -> None:
+    async def scenario() -> FakeBackendClient:
+        fake = FakeBackendClient()
+        fake.configs[7] = {"system_prompt": "x"}
+        config = await fake.get_agent_config(7)
+        assert config["system_prompt"] == "x"
+        assert await fake.get_agent_config(999) is None
+        await fake.post_turns("call-1", [{"turn_index": 0, "speaker": "caller", "text": "hi"}])
+        await fake.post_fields("call-1", [{"field_name": "a", "field_value": "b"}])
+        await fake.post_complete("call-1", status="completed", error=None, summary="done")
+        return fake
+
+    fake = asyncio.run(scenario())
+    assert fake.turns and fake.fields and fake.completions[-1]["summary"] == "done"

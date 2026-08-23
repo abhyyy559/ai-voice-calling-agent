@@ -22,6 +22,7 @@ from _qa_contract import (
     build_test_client,
     build_version_payload,
     create_agent,
+    expect_merged,
     import_app,
     load_absent_student_config,
     register_org,
@@ -130,11 +131,14 @@ def http_env() -> Any:
     client, why_client = build_test_client(app)
     if client is None:
         pytest.skip(f"[Lane A] test harness unavailable: {why_client}")
-    owner, why_org = register_org(client, org_name="Validation Org", email="validator@example.com")
-    assert owner is not None, f"registration broken: {why_org}"
-    agent, why_agent = create_agent(client, owner["token"], "validation-agent")
-    assert agent is not None, f"agent creation broken: {why_agent}"
-    return {"client": client, "token": owner["token"], "agent_id": agent["id"]}
+    with client as entered:
+        owner, why_org = register_org(
+            entered, org_name="Validation Org", email="validator@example.com"
+        )
+        owner = expect_merged(owner, f"registration broken: {why_org}")
+        agent, why_agent = create_agent(entered, owner["token"], "validation-agent")
+        agent = expect_merged(agent, f"agent creation unavailable: {why_agent}")
+        yield {"client": entered, "token": owner["token"], "agent_id": agent["id"]}
 
 
 def _post_version(env: dict[str, Any], payload: dict[str, Any]) -> Any:

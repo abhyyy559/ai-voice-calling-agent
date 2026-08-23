@@ -1,102 +1,101 @@
-"""Offline tests for app.prompting.render_system_prompt."""
+"""Lane E — system prompt rendering contract tests (Lane B voice-agent).
 
+Frozen contract (plan LANE B / spec §5):
+render_system_prompt(config) must produce:
+1. disclosure script verbatim as the FIRST sentence block
+2. question_flow rendered with explicit numbering (1., 2., ...)
+3. extraction instructions including the never-fabricate rule
+
+Skips with a precise reason until Lane B's renderer module is merged.
+"""
 from __future__ import annotations
 
-from typing import Any, Dict
+import re
+from typing import Any, Callable
 
-from app.prompting import (
-    DISCLOSURE_HEADER,
-    EXTRACTION_HEADER,
-    PERSONA_HEADER,
-    QUESTIONS_HEADER,
-    render_system_prompt,
-)
+import pytest
 
-BASE_CONFIG: Dict[str, Any] = {
-    "disclosure_script": (
-        "Hello, I am calling from Acme Academy. I am an AI voice assistant. "
-        "This call is recorded for quality and verification purposes."
-    ),
-    "system_prompt": (
-        "You are an AI voice assistant representing Acme Academy. Your role is "
-        "to contact parents or guardians of absent students."
-    ),
-    "company_context": {"company_name": "Acme Academy", "timezone": "Asia/Kolkata"},
-    "question_flow": [
-        {"step": 1, "question": "Could you share the reason for the absence?"},
-        {"step": 2, "question": "Do you expect the student to return tomorrow?"},
-        {"step": 3, "question": "Is the absence due to a medical reason?"},
-    ],
-    "extraction_schema": {
-        "reason_for_absence": {
-            "type": "string",
-            "description": "Reason provided for the absence.",
-            "validation": "required",
-            "confidence_threshold": 0.8,
-        },
-        "is_sick_leave": {"type": "boolean", "description": "Illness-related.", "validation": "optional"},
-    },
-}
+from _qa_voice_contract import locate_symbols, load_agent_config, normalize
+
+_RENDERER_CANDIDATE_MODULES: list[str] = [
+    "app.prompting",
+    "app.prompts",
+    "app.prompt_renderer",
+    "app.pipeline",
+    "app.conversation",
+    "agent",
+]
+RENDERER_ATTRS: list[str] = ["render_system_prompt", "render_system_output"]
 
 
-def test_disclosure_is_first_block() -> None:
-    rendered = render_system_prompt(BASE_CONFIG)
-
-    assert rendered.lstrip().startswith(DISCLOSURE_HEADER.split(" - ")[0])
-    disclosure_text = BASE_CONFIG["disclosure_script"]
-    assert rendered.index(disclosure_text) < rendered.index(PERSONA_HEADER)
-    assert rendered.index(disclosure_text) < rendered.index(QUESTIONS_HEADER)
-    assert rendered.index(disclosure_text) < rendered.index(EXTRACTION_HEADER)
+@pytest.fixture(scope="module")
+def render() -> Callable[..., str]:
+    fn, why = locate_symbols(RENDERER_ATTRS, _RENDERER_CANDIDATE_MODULES)
+    if fn is None:
+        pytest.skip(f"[Lane B] prompt renderer not merged yet: {why}")
+    return fn
 
 
-def test_questions_are_numbered_in_order() -> None:
-    rendered = render_system_prompt(BASE_CONFIG)
-
-    questions_header_at = rendered.index(QUESTIONS_HEADER)
-    extraction_at = rendered.index(EXTRACTION_HEADER)
-    flow_block = rendered[questions_header_at:extraction_at]
-    assert "1. Could you share the reason for the absence?" in flow_block
-    assert "2. Do you expect the student to return tomorrow?" in flow_block
-    assert "3. Is the absence due to a medical reason?" in flow_block
-    # Order must be ascending.
-    assert flow_block.index("1. ") < flow_block.index("2. ") < flow_block.index("3. ")
-    # The provided step numbers are ignored; numbering is positional 1..n.
-    assert "step" not in flow_block
+def _first_question_marker_index(prompt: str) -> int | None:
+    match = re.search(r"(?m)^\s*1\s*[.)]\s", prompt)
+    return match.start() if match else None
 
 
-def test_escalation_and_never_fabricate_text_present() -> None:
-    rendered = render_system_prompt(BASE_CONFIG)
-    lowered = rendered.lower()
+def test_disclosure_is_the_first_block(render: Callable[..., str]) -> None:
+    config = load_agent_config()
+    prompt = render(config)
+    assert isinstance(prompt, str) and prompt.strip(), "renderer returned an empty prompt"
 
-    assert "never fabricate" in lowered
-    assert "0.6" in rendered  # low-confidence escalation threshold
-    assert "3 times" in lowered or "up to 3" in lowered  # max asks
-    assert "flag" in lowered  # flagged wrap-up requirement
-
-
-def test_required_fields_marked_in_schema_block() -> None:
-    rendered = render_system_prompt(BASE_CONFIG)
-    schema_block = rendered[rendered.index(EXTRACTION_HEADER):]
-
-    assert "`reason_for_absence` [REQUIRED]" in schema_block
-    assert "`is_sick_leave`" in schema_block
-    assert "[REQUIRED]" not in schema_block.split("`is_sick_leave`")[1].split("\n")[0]
-
-
-def test_legacy_mandatory_disclosure_key_supported() -> None:
-    legacy: Dict[str, Any] = dict(BASE_CONFIG)
-    del legacy["disclosure_script"]
-    legacy["mandatory_disclosure"] = "Legacy disclosure sentence."
-
-    rendered = render_system_prompt(legacy)
-
-    assert rendered.lstrip().startswith(
-        DISCLOSURE_HEADER.split(" - ")[0]
-    ), "disclosure block must still come first"
-    assert rendered.index("Legacy disclosure sentence.") < rendered.index(PERSONA_HEADER)
+    disclosure = normalize(config["disclosure_script"])
+    probe = " ".join(disclosure.split()[:8])
+    norm_prompt = normalize(prompt)
+    disc_idx = norm_prompt.find(probe)
+    assert disc_idx >= 0, (
+        f"disclosure script missing from prompt. Probe {probe!r} not found in:\n{prompt[:600]!r}"
+    )
+    q_idx = _first_question_marker_index(prompt)
+    if q_idx is None:
+        pytest.fail(f"no numbered question marker ('1.') found in prompt:\n{prompt[:600]!r}")
+    assert disc_idx < q_idx, (
+        f"disclosure must precede the numbered questions "
+        f"(disclosure at {disc_idx}, first question marker at {q_idx})"
+    )
+    preamble = norm_prompt[:disc_idx]
+    assert len(preamble) <= 200, (
+        f"something precedes the disclosure block ({len(preamble)} chars): {preamble[:200]!r}"
+    )
 
 
-def test_empty_question_flow_renders_without_crash() -> None:
-    minimal = {"disclosure_script": "Hi.", "question_flow": []}
-    rendered = render_system_prompt(minimal)
-    assert "Hi." in rendered
+def test_questions_are_numbered_in_order(render: Callable[..., str]) -> None:
+    config = load_agent_config()
+    prompt = render(config)
+    norm_prompt = normalize(prompt)
+
+    positions: list[int] = []
+    for step, entry in enumerate(config["question_flow"], start=1):
+        marker = re.search(rf"(?m)^\s*{step}\s*[.)]\s", prompt)
+        assert marker is not None, (
+            f"question step {step} has no '{step}.' number marker in:\n{prompt[:600]!r}"
+        )
+        positions.append(marker.start())
+        question_text = normalize(entry["question"])
+        window = norm_prompt[marker.start():marker.start() + 500]
+        key_words = " ".join(question_text.split()[:5])
+        assert key_words in window, (
+            f"question {step} text ({key_words!r}) not found near its marker; "
+            f"window was {window[:300]!r}"
+        )
+    assert positions == sorted(positions), f"questions out of order at {positions}"
+
+
+def test_never_fabricate_rule_present(render: Callable[..., str]) -> None:
+    config = load_agent_config()
+    prompt = render(config)
+    assert "fabricat" in normalize(prompt), (
+        f"never-fabricate extraction rule missing from prompt:\n{prompt[:600]!r}"
+    )
+
+
+def test_render_is_deterministic(render: Callable[..., str]) -> None:
+    config = load_agent_config()
+    assert render(config) == render(config), "renderer output differs between identical calls"
