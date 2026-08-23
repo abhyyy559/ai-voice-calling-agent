@@ -53,9 +53,44 @@ CALL_STATUSES = (
 # call states counted as "in flight" for concurrency limiting
 IN_FLIGHT_CALL_STATUSES = ("queued", "ringing", "in_progress")
 
+# call kinds (enterprise platform): real outbound vs in-browser playground test
+CALL_KINDS = ("phone", "playground")
+AGENT_STATUSES = ("draft", "testing", "live", "archived")
+USER_ROLES = ("owner", "admin", "member")
+
 
 class Base(DeclarativeBase):
     """Declarative base for all models."""
+
+
+class Organization(Base):
+    """A tenant: every other entity hangs off an organization."""
+
+    __tablename__ = "organizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(200), unique=True, index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    users: Mapped[list["User"]] = relationship(back_populates="organization")
+
+
+class User(Base):
+    """A member of an organization (email/password, JWT auth)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    organization: Mapped[Organization] = relationship(back_populates="users")
 
 
 class DomainConfig(Base):

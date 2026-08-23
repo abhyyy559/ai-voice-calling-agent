@@ -11,5 +11,10 @@ openpyxl>=3.1
 redis>=5.0
 python-dotenv>=1.0
 tzdata>=2024.1  # zoneinfo database on platforms without a system tz db (e.g. Windows)
+# --- auth (enterprise platform, Lane A) ---
+pyjwt>=2.8
+bcrypt>=4.1  # password hashing (passlib 1.7.4 is unmaintained / incompatible w/ py3.13)
+# --- livekit room tokens for web playground ---
+livekit-api>=0.7
 pytest>=8.0
 httpx>=0.27

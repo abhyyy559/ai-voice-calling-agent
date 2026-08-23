@@ -53,10 +53,50 @@ class Settings(BaseSettings):
     # Default: ../domain-configs relative to repo root. In container: /domain-configs.
     domain_configs_dir: str = "../domain-configs"
 
+    # --- auth / tenancy -----------------------------------------------------
+    jwt_secret: str = "change_me"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24 * 7  # one week
+    # Comma-separated allowlist of browser origins for CORS.
+    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    # --- internal service API (voice-agent -> backend) -----------------------
+    # Header X-Internal-Token must match; empty string disables the internal API.
+    internal_api_token: str = ""
+
+    # --- livekit (playground room tokens) ------------------------------------
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
+    # --- voice pipeline provider keys (presence-only checks by /api/health) ---
+    # Consumed by the voice-agent worker; the backend never sends these anywhere.
+    deepgram_api_key: str = ""
+    cartesia_api_key: str = ""
+    groq_api_key: str = ""
+    openai_api_key: str = ""
+
     @property
     def test_phone_number_list(self) -> list[str]:
         """TEST_PHONE_NUMBERS split into a stripped list."""
         return [p.strip() for p in self.test_phone_numbers.split(",") if p.strip()]
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """CORS_ORIGINS split into a stripped list."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def provider_presence(self) -> dict[str, bool]:
+        """Provider API-key PRESENCE booleans only — never key values."""
+        return {
+            "deepgram": bool(self.deepgram_api_key),
+            "cartesia": bool(self.cartesia_api_key),
+            "groq": bool(self.groq_api_key),
+            "openai": bool(self.openai_api_key),
+            "twilio": bool(self.twilio_account_sid and self.twilio_auth_token),
+            "livekit": bool(self.livekit_api_key and self.livekit_api_secret),
+        }
 
     @property
     def media_ws_base_url(self) -> str:

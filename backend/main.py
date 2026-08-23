@@ -1,18 +1,8 @@
-from fastapi import FastAPI
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+"""Legacy entrypoint — kept as a thin re-export of the app factory.
 
-app = FastAPI()
+``uvicorn main:app`` (older compose command) and ``uvicorn app.main:app``
+(current) both work. The canonical application lives in ``app.main``.
+"""
+from app.main import app
 
-database_url = "postgresql://user:password@localhost/db"
-engine = create_engine(database_url)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-@app.on_event("startup")
-def startup():
-    db = SessionLocal()
-    db.close()
-
-@app.get("/")
-def read_root():
-    return {"message": "AI Voice Calling Agent Backend"}
+__all__ = ["app"]
