@@ -1,5 +1,51 @@
 export const API_BASE = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
 
+const TOKEN_KEY = 'vat_token';
+const USER_KEY = 'vat_user';
+
+// ---------------------------------------------------------------------------
+// JWT session storage
+// ---------------------------------------------------------------------------
+
+export function getToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setSession(token, user) {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+    if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+  } catch {
+    /* private mode etc. — session simply won't persist */
+  }
+}
+
+export function clearSession() {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getStoredUser() {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
 export class ApiError extends Error {
   constructor(message, status, body) {
     super(message);
@@ -22,8 +68,19 @@ function extractErrorDetail(body) {
   return JSON.stringify(body);
 }
 
+// ---------------------------------------------------------------------------
+// Core fetch wrapper
+// ---------------------------------------------------------------------------
+
+/** Paths that may legitimately return 401 without killing the session. */
+function isAuthPath(path) {
+  return path.startsWith('/api/auth/login') || path.startsWith('/api/auth/register');
+}
+
 /**
  * Minimal fetch wrapper. JSON in / JSON out, FormData supported.
+ * Injects `Authorization: Bearer <jwt>` when a token is stored.
+ * On an unexpected 401 the session is cleared and the app redirects to /login.
  * Throws ApiError with a human-readable message on non-2xx responses.
  */
 export async function apiFetch(path, options = {}) {
@@ -31,6 +88,8 @@ export async function apiFetch(path, options = {}) {
   if (options.body != null && !(options.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
   }
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
   let res;
   try {
@@ -40,6 +99,13 @@ export async function apiFetch(path, options = {}) {
   }
 
   if (!res.ok) {
+    if (res.status === 401 && !isAuthPath(path)) {
+      clearSession();
+      // Full navigation is intentional: resets every in-memory state cleanly.
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.assign('/login');
+      }
+    }
     let body = null;
     try {
       body = await res.json();
@@ -60,6 +126,52 @@ export async function apiFetch(path, options = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Route-group helpers ("typed-ish" wrappers per API group)
+// ---------------------------------------------------------------------------
+
+export const authApi = {
+  register: ({ orgName, email, password }) =>
+    apiFetch('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ org_name: orgName, email, password }),
+    }),
+  login: ({ email, password }) =>
+    apiFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  me: () => apiFetch('/api/auth/me'),
+};
+
+export const agentsApi = {
+  list: () => apiFetch('/api/agents'),
+  create: (data) => apiFetch('/api/agents', { method: 'POST', body: JSON.stringify(data) }),
+  get: (id) => apiFetch(`/api/agents/${id}`),
+  patchMeta: (id, data) => apiFetch(`/api/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  archive: (id) => apiFetch(`/api/agents/${id}`, { method: 'DELETE' }),
+  createVersion: (agentId, config) =>
+    apiFetch(`/api/agents/${agentId}/versions`, { method: 'POST', body: JSON.stringify(config) }),
+  listVersions: (agentId) => apiFetch(`/api/agents/${agentId}/versions`),
+  getVersion: (versionId) => apiFetch(`/api/agent-versions/${versionId}`),
+};
+
+export const playgroundApi = {
+  startSession: (agentVersionId) =>
+    apiFetch('/api/playground/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ agent_version_id: agentVersionId }),
+    }),
+  completeSession: (callId) => apiFetch(`/api/playground/sessions/${callId}/complete`, { method: 'POST' }),
+};
+
+export const devApi = {
+  /** No auth required by design — safe to poll before login. */
+  health: () => apiFetch('/api/health'),
+  status: () => apiFetch('/api/dev/status'),
+};
+
+// Legacy flat surface kept for existing pages (campaigns / contacts / calls).
 export const api = {
   listCampaigns: () => apiFetch('/api/campaigns'),
   createCampaign: (data) => apiFetch('/api/campaigns', { method: 'POST', body: JSON.stringify(data) }),
@@ -84,6 +196,9 @@ export const api = {
   listCampaignCalls: (campaignId) => apiFetch(`/api/campaigns/${campaignId}/calls`),
   getCall: (callId) => apiFetch(`/api/calls/${callId}`),
   placeTestCall: (data) => apiFetch('/api/test-call', { method: 'POST', body: JSON.stringify(data) }),
+
+  // Newer additions used by pages built on the platform contract.
+  listAgents: agentsApi.list,
 };
 
 export function campaignExportUrl(campaignId, format) {
