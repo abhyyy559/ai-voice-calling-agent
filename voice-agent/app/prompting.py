@@ -15,7 +15,7 @@ unit tested offline. The rendered prompt is structured, in order:
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 LOW_CONFIDENCE_THRESHOLD: float = 0.6
 MAX_ASKS_PER_FIELD: int = 3
@@ -25,6 +25,7 @@ DISCLOSURE_HEADER = (
 )
 PERSONA_HEADER = "WHO YOU ARE - role and mission:"
 CONTEXT_HEADER = "COMPANY KNOWLEDGE - facts you may use; never invent anything beyond this:"
+CALLER_CONTEXT_HEADER = "CALLER CONTEXT - who this specific call is about:"
 QUESTIONS_HEADER = "YOUR GOALS - information to collect during the call:"
 EXTRACTION_HEADER = "RECORDING ANSWERS - extraction discipline:"
 ESCALATION_HEADER = "WHEN TO WRAP UP:"
@@ -46,8 +47,65 @@ def _question_text(item: Any) -> str:
     return str(item or "").strip()
 
 
-def render_system_prompt(config: Mapping[str, Any]) -> str:
-    """Render the full agent instructions from an agent-version config."""
+def render_caller_context(contact: Mapping[str, Any]) -> str:
+    """CALLER CONTEXT block (P0-2) from the contact card packed in room/token
+    metadata. Names the person the call is about, tells the agent who to ask
+    for, and enforces verify-relationship-before-details."""
+    fields: dict[str, str] = {}
+    if isinstance(contact, Mapping):
+        for key, value in contact.items():
+            name = str(key).strip()
+            if not name or isinstance(value, (dict, list)):
+                continue
+            text = str(value).strip()
+            if text:
+                fields[name] = text
+
+    lines = [CALLER_CONTEXT_HEADER]
+    about: list[str] = []
+    student = fields.get("student_name") or ""
+    parent = fields.get("parent_name") or ""
+    if student:
+        about.append(f"the student {student}")
+    if fields.get("class_section"):
+        about.append(f"class {fields['class_section']}")
+    if fields.get("absent_date"):
+        about.append(f"absent on {fields['absent_date']}")
+    if about:
+        lines.append("- You are calling about " + ", ".join(about) + ".")
+    else:
+        lines.append(
+            "- Details of the person this call is about: "
+            + json.dumps(fields, ensure_ascii=False, sort_keys=True)
+        )
+    if parent:
+        lines.append(f"- Ask to speak with {parent} (the parent/guardian).")
+    verify_target = parent if parent else "the parent/guardian"
+    lines.extend(
+        [
+            (
+                "- VERIFY RELATIONSHIP BEFORE DETAILS: confirm you are speaking with "
+                f"{verify_target} before discussing any details about the student."
+            ),
+            (
+                "- If the person who answered is NOT "
+                f"{verify_target}, do NOT share any details: ask when they will be "
+                "available, thank them politely, say goodbye, and end the call."
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_system_prompt(
+    config: Mapping[str, Any], contact: Optional[Mapping[str, Any]] = None
+) -> str:
+    """Render the full agent instructions from an agent-version config.
+
+    ``contact`` (optional, P0-2) is the flat custom-field card packed into the
+    room/token metadata; when present a CALLER CONTEXT section personalizes
+    the prompt and adds the parent-verification rule.
+    """
     sections: list[str] = []
 
     # 1. Disclosure FIRST and verbatim.
@@ -73,6 +131,10 @@ def render_system_prompt(config: Mapping[str, Any]) -> str:
             f"{CONTEXT_HEADER}\n"
             + json.dumps(company_context, indent=2, ensure_ascii=False, default=str)
         )
+
+    # 3b. Caller context (P0-2) — who this specific call is about.
+    if contact:
+        sections.append(render_caller_context(contact))
 
     # 4. Speaking style — this is what makes it sound human instead of IVR-like.
     sections.append(

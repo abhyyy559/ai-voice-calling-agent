@@ -67,10 +67,13 @@ class ParsedJob:
 
     version_id: Any
     call_id: str
+    # P0-2: flat contact card packed by the backend at session/call creation;
+    # rendered into the system prompt's CALLER CONTEXT section.
+    contact: Optional[Mapping[str, Any]] = None
 
 
 def parse_room_metadata(raw: Any) -> Optional[ParsedJob]:
-    """Parse ``{"version_id", "call_id"}`` room metadata defensively."""
+    """Parse ``{"version_id", "call_id", "contact": {...}}`` room metadata defensively."""
     if not raw:
         return None
     meta: Any = raw
@@ -86,7 +89,12 @@ def parse_room_metadata(raw: Any) -> Optional[ParsedJob]:
     call_id = str(meta.get("call_id") or "").strip()
     if version_id is None or not call_id:
         return None
-    return ParsedJob(version_id=version_id, call_id=call_id)
+    contact = meta.get("contact")
+    return ParsedJob(
+        version_id=version_id,
+        call_id=call_id,
+        contact=contact if isinstance(contact, Mapping) else None,
+    )
 
 
 @dataclass
@@ -623,7 +631,7 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
         assert bundle.stt is not None and bundle.llm is not None
         assert bundle.tts is not None
 
-        instructions = render_system_prompt(config)
+        instructions = render_system_prompt(config, contact=parsed.contact)
         coordinator = ExtractionCoordinator(
             required_fields=_required_fields_from_schema(config),
             low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,

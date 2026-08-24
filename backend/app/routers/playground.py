@@ -45,6 +45,38 @@ _MAX_TOOL_ROUNDS = 3
 
 class SessionCreate(BaseModel):
     agent_version_id: int = Field(gt=0)
+    # P0-2 personalization: flat {field: scalar} contact card (e.g.
+    # student_name / parent_name) rendered into the agent's system prompt.
+    contact: Optional[dict[str, Any]] = None
+
+
+def _clean_contact(raw: Optional[dict[str, Any]]) -> dict[str, str]:
+    """Keep only flat, non-empty string fields from a caller-supplied card."""
+    if not raw:
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, value in list(raw.items())[:50]:
+        name = str(key).strip()[:100]
+        if not name or isinstance(value, (dict, list)):
+            continue
+        text = str(value).strip()[:500]
+        if text:
+            cleaned[name] = text
+    return cleaned
+
+
+def _call_context(contact: dict[str, str]) -> Optional[dict[str, Any]]:
+    return {"contact": contact} if contact else None
+
+
+def _call_metadata(
+    version_id: int, call_id: int, context: Optional[dict[str, Any]]
+) -> dict[str, Any]:
+    """Room/token metadata contract consumed by the voice-agent worker."""
+    metadata: dict[str, Any] = {"version_id": version_id, "call_id": call_id}
+    if context and isinstance(context.get("contact"), dict):
+        metadata["contact"] = context["contact"]
+    return metadata
 
 
 class TurnCreate(BaseModel):
@@ -85,12 +117,12 @@ def _get_own_playground_call(db: Session, call_id: int, user: User) -> Call:
 
 
 def _set_room_metadata_best_effort(
-    settings: Settings, room_name: str, version_id: int, call_id: int
+    settings: Settings, room_name: str, metadata: dict[str, Any]
 ) -> None:
     """Mirror token metadata onto the room so the worker sees it immediately.
 
     Best-effort: if the LiveKit server is unreachable the participant-token
-    fallback in the voice agent still carries {version_id, call_id}.
+    fallback still carries {version_id, call_id, contact}.
     """
     import asyncio
 
@@ -107,9 +139,7 @@ def _set_room_metadata_best_effort(
                 await client.room.update_room_metadata(
                     livekit_api.UpdateRoomMetadataRequest(
                         room=room_name,
-                        metadata=json.dumps(
-                            {"version_id": version_id, "call_id": call_id}
-                        ),
+                        metadata=json.dumps(metadata),
                     )
                 )
             finally:
@@ -139,23 +169,26 @@ def create_session(
     agent = get_org_or_404(db, Agent, version.agent_id, user.org_id)
 
     room_name = f"playground-{user.org_id}-{uuid.uuid4()}"
+    context = _call_context(_clean_contact(payload.contact))
     call = Call(
         kind="playground",
         status="in_progress",
         org_id=user.org_id,
         agent_version_id=version.id,
         started_at=utcnow(),
+        context=context,
     )
     db.add(call)
     db.flush()  # need call.id for the room metadata before signing
 
+    metadata = _call_metadata(version.id, call.id, context)
     token = _issue_room_token(
         settings,
         room_name,
         identity=f"user-{user.id}",
-        metadata={"version_id": version.id, "call_id": call.id},
+        metadata=metadata,
     )
-    _set_room_metadata_best_effort(settings, room_name, version.id, call.id)
+    _set_room_metadata_best_effort(settings, room_name, metadata)
     logger.info(
         "playground session created call_id=%s org=%s agent=%s version=%s room=%s",
         call.id,
@@ -267,12 +300,14 @@ def _question_text(item: Any) -> str:
     return str(item or "").strip()
 
 
-def _render_text_system_prompt(config: Any) -> str:
+def _render_text_system_prompt(config: Any, contact: Optional[dict[str, str]] = None) -> str:
     """Slim server-side twin of voice-agent/app/prompting.render_system_prompt.
 
     Same section order and discipline (disclosure verbatim first, TTS-safe
     style rules so text replies behave like the spoken ones), but compact
-    enough to keep text-mode token cost low.
+    enough to keep text-mode token cost low. ``contact`` (P0-2) appends the
+    CALLER CONTEXT block so the agent personalizes and verifies the
+    relationship before sharing any details.
     """
     sections: list[str] = []
 
@@ -303,6 +338,36 @@ def _render_text_system_prompt(config: Any) -> str:
             "COMPANY KNOWLEDGE - facts you may use; never invent anything beyond this:\n"
             + json.dumps(company_context, ensure_ascii=False, default=str)
         )
+
+    # 3b. CALLER CONTEXT (P0-2) — who this specific call is about.
+    if contact:
+        student = contact.get("student_name") or ""
+        parent = contact.get("parent_name") or ""
+        context_lines = ["CALLER CONTEXT - who this call is about:"]
+        about: list[str] = []
+        if student:
+            about.append(f"the student {student}")
+        if contact.get("class_section"):
+            about.append(f"class {contact['class_section']}")
+        if contact.get("absent_date"):
+            about.append(f"absent on {contact['absent_date']}")
+        if about:
+            context_lines.append("- You are calling about " + ", ".join(about) + ".")
+        else:
+            context_lines.append(
+                "- Details: " + json.dumps(contact, ensure_ascii=False)
+            )
+        if parent:
+            context_lines.append(f"- Ask to speak with {parent} (the parent/guardian).")
+        context_lines.extend(
+            [
+                "- VERIFY RELATIONSHIP BEFORE DETAILS: confirm you are speaking with the "
+                "parent/guardian before discussing any details.",
+                "- If the person who answered is NOT the parent/guardian, do not share any details: "
+                "ask when they will be available, thank them politely, and end the call.",
+            ]
+        )
+        sections.append("\n".join(context_lines))
 
     # 4. TTS-safe speaking style (kept identical in spirit to the voice agent).
     sections.append(
@@ -544,7 +609,9 @@ async def create_turn(
     if not start_event and not user_text:
         raise HTTPException(status_code=422, detail="'text' must not be empty.")
 
-    system_prompt = _render_text_system_prompt(version)
+    system_prompt = _render_text_system_prompt(
+        version, contact=(call.context or {}).get("contact")
+    )
     history_rows = list(
         db.scalars(
             select(Transcript)
@@ -562,16 +629,20 @@ async def create_turn(
     if start_event:
         # NOTE: must be role "user" - some Groq models reject tool-bound
         # requests whose messages do not end with a user query.
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "[Call just connected; the callee has not spoken yet] "
-                    "Produce ONLY your opening utterance now: the mandatory disclosure "
-                    "followed by a warm one-line greeting and your first question."
-                ),
-            }
+        kickoff = (
+            "[Call just connected; the callee has not spoken yet] "
+            "Produce ONLY your opening utterance now: the mandatory disclosure "
+            "followed by a warm one-line greeting and your first question."
         )
+        contact = (call.context or {}).get("contact") or {}
+        student = str(contact.get("student_name") or "").strip()
+        parent = str(contact.get("parent_name") or "").strip()
+        if student:
+            kickoff += (
+                f" You are calling about {student}"
+                + (f"; ask to speak with {parent}." if parent else ".")
+            )
+        messages.append({"role": "user", "content": kickoff})
     else:
         messages.append({"role": "user", "content": user_text})
 

@@ -299,3 +299,42 @@ def test_turns_require_bearer(client):
         client.post("/api/playground/sessions/1/turns", json={"text": "hi"}).status_code
         == 401
     )
+
+
+def test_session_contact_persisted_and_injected_into_start_prompt(groq_client, session_factory):
+    """P0-2: SessionCreate.contact is persisted on the call row and the
+    personalization reaches the LLM prompt on the opening turn."""
+    from app.models import Call
+
+    token, _ = register(groq_client)
+    ids = _make_agent_and_version(groq_client, token)
+    session = groq_client.post(
+        "/api/playground/sessions",
+        json={
+            "agent_version_id": ids["version"]["id"],
+            "contact": {"student_name": "Aarav", "parent_name": "Suresh"},
+        },
+        headers=auth_headers(token),
+    )
+    assert session.status_code == 200, session.text
+    call_id = int(session.json()["call_id"])
+
+    with session_factory() as db:
+        call = db.get(Call, call_id)
+        assert call.context == {
+            "contact": {"student_name": "Aarav", "parent_name": "Suresh"}
+        }
+
+    script(chat("Hello, this is an automated assistant calling about Aarav. May I speak with Suresh?"))
+    resp = groq_client.post(
+        f"/api/playground/sessions/{call_id}/turns",
+        json={"text": "", "event": "start"},
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    sent = _FakeAsyncClient.requests[-1]["json"]
+    system_msg = sent["messages"][0]["content"]
+    kickoff_msg = sent["messages"][-1]["content"]
+    assert "Aarav" in system_msg and "Suresh" in system_msg
+    assert "Aarav" in kickoff_msg

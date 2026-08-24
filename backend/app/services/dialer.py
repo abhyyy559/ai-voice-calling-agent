@@ -109,6 +109,10 @@ class DialerService:
             org_id=campaign.org_id,
             status="queued",
             started_at=now,
+            # P0-2: pack the contact card at call creation so any room/token
+            # created for this call carries the same personalization metadata
+            # as the playground path.
+            context={"contact": dict(contact.custom_fields or {})},
         )
         db.add(call)
         db.commit()  # persist queued call first so it counts as in-flight on failure paths

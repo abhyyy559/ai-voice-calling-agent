@@ -281,6 +281,9 @@ class Call(Base):
     flagged_for_human: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     cost: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     latency: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # Runtime context packed into LiveKit room/token metadata at session
+    # creation (P0-2): {"contact": {...custom_fields}} personalizes the prompt.
+    context: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
