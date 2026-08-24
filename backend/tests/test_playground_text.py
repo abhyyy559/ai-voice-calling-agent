@@ -177,7 +177,9 @@ def test_start_event_produces_opening_line_without_user_message(groq_client):
 
     sent = _FakeAsyncClient.requests[-1]["json"]
     roles = [m["role"] for m in sent["messages"]]
-    assert roles == ["system", "system"], "start event must send no user message"
+    # Kickoff rides as a user-role message: some Groq models reject tool-bound
+    # requests without a trailing user query. It is never persisted.
+    assert roles == ["system", "user"], "start event must send no real user message"
     assert "opening utterance" in sent["messages"][-1]["content"]
 
 

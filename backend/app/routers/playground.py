@@ -440,6 +440,12 @@ async def _groq_chat(
     headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
     async with httpx.AsyncClient(base_url=_GROQ_BASE_URL, timeout=45.0) as client:
         response = await client.post("/chat/completions", json=body, headers=headers)
+    if response.status_code == 429:
+        logger.warning("Groq chat rate limited (429): %s", response.text[:300])
+        raise HTTPException(
+            status_code=429,
+            detail="The AI service rate limit was hit. Wait a few seconds and send again.",
+        )
     if response.status_code != 200:
         logger.error("Groq chat failed (%s): %s", response.status_code, response.text[:500])
         raise HTTPException(status_code=502, detail="The language model did not respond. Try again shortly.")
@@ -554,13 +560,15 @@ async def create_turn(
             {"role": "assistant" if row.speaker == "agent" else "user", "content": row.text}
         )
     if start_event:
+        # NOTE: must be role "user" - some Groq models reject tool-bound
+        # requests whose messages do not end with a user query.
         messages.append(
             {
-                "role": "system",
+                "role": "user",
                 "content": (
+                    "[Call just connected; the callee has not spoken yet] "
                     "Produce ONLY your opening utterance now: the mandatory disclosure "
-                    "followed by a warm one-line greeting and your first question. "
-                    "There is no user message yet."
+                    "followed by a warm one-line greeting and your first question."
                 ),
             }
         )
