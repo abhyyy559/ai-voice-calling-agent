@@ -92,6 +92,22 @@ def render_system_prompt(config: Mapping[str, Any]) -> str:
         "- Stay polite and calm even if the caller is upset or wants to hang up."
     )
 
+    # 4b. Guardrails — on-topic only, privacy, brevity, human handoff.
+    sections.append(
+        "HARD RULES (non-negotiable):\n"
+        "- STAY ON TOPIC: you only discuss the purpose of this call defined above. "
+        "If asked anything unrelated (news, general knowledge, personal opinions), "
+        "politely decline: 'I can only help with <purpose> today' and steer back.\n"
+        "- PRIVACY: never share any information about OTHER students, callers or records. "
+        "Only discuss the specific person this call is about.\n"
+        "- VERIFY BEFORE SHARING: if the relationship of the person answering is unclear "
+        "for a sensitive topic, confirm who you are speaking with first.\n"
+        "- BE BRIEF: complete the goals and end the call promptly - every extra minute costs money.\n"
+        "- HUMAN HANDOFF: if the caller repeatedly drifts off-topic, demands things beyond "
+        "your scope, or needs more help than this call provides, say you will arrange a "
+        "human representative to follow up, then call `end_call` with that summary."
+    )
+
     # 5. Goals (question flow) as a checklist, woven naturally.
     question_flow = config.get("question_flow") or []
     goal_items: list[str] = []

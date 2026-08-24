@@ -638,11 +638,7 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             tts=bundle.tts,
             # Stricter VAD: ignore faint background voices/noise so the agent
             # stops being interrupted by anyone besides the actual caller.
-            vad=silero.VAD.load(
-                activation_threshold=0.6,
-                min_speech_duration_ms=150,
-                min_silence_duration_ms=250,
-            ),
+            vad=silero.VAD.load(),
             # Local VAD turn detection: skips the LiveKit cloud detector whose
             # 401 retries stalled every session start by ~4s.
             turn_detection="vad",
@@ -654,7 +650,7 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             min_interruption_duration=0.35,
             false_interruption_timeout=2.0,
             resume_false_interruption=True,
-            discard_audio_if_uninterruptible=True,
+            discard_audio_if_uninterruptible=False,
         )
         telemetry = TurnTelemetry(
             session=session,
