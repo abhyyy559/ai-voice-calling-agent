@@ -12,6 +12,7 @@ import CampaignDetailPage from './pages/CampaignDetailPage.jsx';
 import CallDetailPage from './pages/CallDetailPage.jsx';
 import GuidePage from './pages/GuidePage.jsx';
 import TestCallPage from './pages/TestCallPage.jsx';
+import PhoneNumbersPage from './pages/PhoneNumbersPage.jsx';
 
 // livekit-client (~700 kB minified) is only needed on the Playground route —
 // keep it out of the initial bundle.
@@ -65,6 +66,7 @@ export default function App() {
             <Route path="calls/:id" element={<CallDetailPage />} />
             <Route path="guide" element={<GuidePage />} />
             <Route path="test-call" element={<TestCallPage />} />
+            <Route path="phone-numbers" element={<PhoneNumbersPage />} />
             <Route path="dev" element={<DevToolsPage />} />
             <Route path="*" element={<NotFound />} />
           </Route>

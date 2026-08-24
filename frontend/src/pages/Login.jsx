@@ -48,10 +48,10 @@ export default function Login() {
     <div className="auth-screen">
       <div className="auth-card">
         <div className="auth-brand">
-          <div className="brand-mark">AI</div>
+          <div className="brand-mark">V</div>
           <div>
-            <div className="brand-name">Voice Calling Agent</div>
-            <div className="brand-sub">Admin console</div>
+            <div className="brand-name">VocalIQ</div>
+            <div className="brand-sub">Voice calling console</div>
           </div>
         </div>
 

@@ -1,61 +1,137 @@
 import React from 'react';
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { clearSession, getStoredUser } from '../api.js';
 
-function DashboardIcon() {
+/* --- inline SVG icon set (16px, currentColor) ------------------------------ */
+
+function IconOverview() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M3 3h8v8H3V3zm10 0h8v5h-8V3zM3 13h8v8H3v-8zm10-3h8v11h-8V10z" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="9" rx="1.5" />
+      <rect x="14" y="3" width="7" height="5" rx="1.5" />
+      <rect x="14" y="12" width="7" height="9" rx="1.5" />
+      <rect x="3" y="16" width="7" height="5" rx="1.5" />
     </svg>
   );
 }
 
-function AgentsIcon() {
+function IconAgents() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M12 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM4 22c0-4.4 3.6-7 8-7s8 2.6 8 7H4z" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="4" y="8" width="16" height="12" rx="3" />
+      <path d="M12 8V4M9 14h.01M15 14h.01" />
+      <circle cx="12" cy="3" r="1" />
     </svg>
   );
 }
 
-function PlayIcon() {
+function IconCampaigns() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 1 1-6 0V5a3 3 0 0 1 3-3zM5 11h2a5 5 0 0 0 10 0h2a7 7 0 0 1-6 6.93V21h3v2H8v-2h3v-3.07A7 7 0 0 1 5 11z" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M22 12h-4l-3 8L9 4l-3 8H2" />
     </svg>
   );
 }
 
-function CampaignsIcon() {
+function IconCalls() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h10v2H4v-2z" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1.5 1.5 0 0 1 1.6-.33c1.2.4 2.5.62 3.6.62a1.5 1.5 0 0 1 1.5 1.5V20a1.5 1.5 0 0 1-1.5 1.5C10.6 21.5 2.5 13.4 2.5 3.5A1.5 1.5 0 0 1 4 2h3.1a1.5 1.5 0 0 1 1.5 1.5c0 1.2.2 2.4.6 3.6a1.5 1.5 0 0 1-.33 1.6l-2.27 2.1z" transform="scale(0.92) translate(1,0)" />
+      <path d="M14.5 4.5 21 11M21 5v6h-6" opacity="0" />
     </svg>
   );
 }
 
-function GuideIcon() {
+function IconPhone() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm1 16v2h11v-2H7zm0-2h11V4H7v12z" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" />
     </svg>
   );
 }
 
-// Exactly five items: everything else lives in the sidebar footer links below.
+function IconGuide() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" />
+      <path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" />
+    </svg>
+  );
+}
+
+function IconPlayground() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10a7 7 0 0 0 14 0M12 17v4" />
+    </svg>
+  );
+}
+
+function IconTestCall() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 3h4l.6 3-2 1.2a10.5 10.5 0 0 0 5.2 5.2L18 10.4 21 11v4a2 2 0 0 1-2 2A14 14 0 0 1 5 3a2 2 0 0 1 2-2h2z" opacity="0" />
+      <path d="M10 2v6l-2.5 1.5a11 11 0 0 0 5 5L14 12l6 2v4a2 2 0 0 1-2 2A16 16 0 0 1 4 6a2 2 0 0 1 2-2h4z" opacity="0" />
+      <path d="m6 15 4-6 3 4 2-2.5 3 4.5" />
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+    </svg>
+  );
+}
+
+function IconDev() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m8 9-4 3 4 3M16 9l4 3-4 3M13.5 5l-3 14" />
+    </svg>
+  );
+}
+
+/* --- nav model -------------------------------------------------------------- */
+
 const NAV_ITEMS = [
-  { to: '/', end: true, icon: <DashboardIcon />, label: 'Home' },
-  { to: '/agents', icon: <AgentsIcon />, label: 'Agents' },
-  { to: '/playground', icon: <PlayIcon />, label: 'Playground' },
-  { to: '/campaigns', icon: <CampaignsIcon />, label: 'Campaigns' },
-  { to: '/guide', icon: <GuideIcon />, label: 'Guide' },
+  { to: '/', end: true, icon: <IconOverview />, label: 'Overview' },
+  { to: '/agents', icon: <IconAgents />, label: 'Agents' },
+  { to: '/campaigns', icon: <IconCampaigns />, label: 'Campaigns' },
+  { to: '/calls', icon: <IconCalls />, label: 'Call History' },
+  { to: '/phone-numbers', icon: <IconPhone />, label: 'Phone Numbers', soon: true },
+  { to: '/guide', icon: <IconGuide />, label: 'Guide' },
 ];
+
+const UTILITY_LINKS = [
+  { to: '/playground', icon: <IconPlayground />, label: 'Playground' },
+  { to: '/test-call', icon: <IconTestCall />, label: 'Test Call' },
+  { to: '/dev', icon: <IconDev />, label: 'Dev' },
+];
+
+/** Topbar [title, subtitle] derived from the current path. */
+function titleFor(pathname) {
+  if (pathname === '/') return ['Overview', 'Usage, latency and recent activity for your organization'];
+  if (pathname === '/agents/new' || pathname.match(/^\/agents\/new\/?$/)) {
+    return ['New agent', 'Six-step builder wizard — saving creates version 1'];
+  }
+  if (pathname.match(/^\/agents\/\d+\/edit\/?$/)) return ['Edit agent', 'Builder wizard — every save snapshots a new immutable version'];
+  if (pathname.match(/^\/agents\/\d+\/?$/)) return ['Agent workspace', 'Configure the next version and test it side by side'];
+  if (pathname.startsWith('/agents')) return ['Agents', 'Your AI caller personas and their versions'];
+  if (pathname.match(/^\/calls\/\d+\/?$/)) return ['Call detail', 'Transcript, extracted fields and latency for one call'];
+  if (pathname.startsWith('/calls')) return ['Call history', 'Every call this organization has placed or simulated'];
+  if (pathname.match(/^\/campaigns\/\d+\/?$/)) return ['Campaign dashboard', 'Live progress, contacts and calls for one campaign'];
+  if (pathname.startsWith('/campaigns')) return ['Campaigns', 'Batch outbound calling against pinned agent versions'];
+  if (pathname.startsWith('/playground')) return ['Playground', 'Talk or type with any saved agent version — zero minutes used'];
+  if (pathname.startsWith('/test-call')) return ['Test call', 'Place a single sandbox call to your own number'];
+  if (pathname.startsWith('/dev')) return ['Developer tools', 'Service health, provider keys, API catalog'];
+  if (pathname.startsWith('/phone-numbers')) return ['Phone numbers', 'Provision and manage DIDs'];
+  if (pathname.startsWith('/guide')) return ['Guide', 'From empty account to first campaign'];
+  return ['VocalIQ', 'AI voice calling console'];
+}
 
 const navClass = ({ isActive }) => `nav-link${isActive ? ' active' : ''}`;
 
 export default function Layout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const user = getStoredUser();
+  const [title, subtitle] = titleFor(location.pathname);
 
   function logout() {
     clearSession();
@@ -66,17 +142,18 @@ export default function Layout() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="brand-mark">AI</div>
+          <div className="brand-mark">V</div>
           <div>
-            <div className="brand-name">Voice Calling Agent</div>
-            <div className="brand-sub">Admin console</div>
+            <div className="brand-name">VocalIQ</div>
+            <div className="brand-sub">Voice calling console</div>
           </div>
         </div>
         <nav className="sidebar-nav" aria-label="Main navigation">
           {NAV_ITEMS.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} className={navClass}>
+            <NavLink key={item.to} to={item.to} end={item.end} className={navClass} title={item.soon ? `${item.label} — coming soon` : item.label}>
               {item.icon}
               <span>{item.label}</span>
+              {item.soon && <span className="nav-soon">soon</span>}
             </NavLink>
           ))}
         </nav>
@@ -88,20 +165,23 @@ export default function Layout() {
             Sign out
           </button>
         </div>
-        {/* Subtle utility links — kept out of the main nav on purpose. */}
+        {/* Utility surfaces — kept out of the main nav on purpose. */}
         <div className="sidebar-footlinks">
-          <NavLink to="/test-call" className="footlink">
-            Test Call
-          </NavLink>
-          <NavLink to="/dev" className="footlink">
-            Dev
-          </NavLink>
+          {UTILITY_LINKS.map((link) => (
+            <NavLink key={link.to} to={link.to} className="footlink">
+              {link.icon}
+              <span>{link.label}</span>
+            </NavLink>
+          ))}
         </div>
         <div className="sidebar-footer">Phase 1 · English · India</div>
       </aside>
       <div className="main-area">
         <header className="topbar">
-          <h1>AI Voice Calling Agent</h1>
+          <div>
+            <h1>{title}</h1>
+            <div className="topbar-sub">{subtitle}</div>
+          </div>
           <span className="topbar-tag">Admin</span>
         </header>
         <main className="content">

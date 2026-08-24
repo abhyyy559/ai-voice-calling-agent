@@ -31,10 +31,10 @@ export default function LandingPage() {
     <div className="landing">
       <header className="land-top">
         <div className="land-brand">
-          <div className="brand-mark">AI</div>
+          <div className="brand-mark">V</div>
           <div>
-            <div className="brand-name">Voice Calling Agent</div>
-            <div className="brand-sub">Admin console</div>
+            <div className="brand-name">VocalIQ</div>
+            <div className="brand-sub">Voice calling console</div>
           </div>
         </div>
         <nav className="land-actions" aria-label="Account">
