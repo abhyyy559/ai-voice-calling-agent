@@ -124,10 +124,16 @@ def build_providers(settings: Settings) -> ProviderBundle:
     if settings.groq_api_key:
         # livekit-agents 1.7.0 has no LLM.with_groq classmethod — Groq is an
         # OpenAI-compatible endpoint, so construct it explicitly.
+        kwargs: dict[str, Any] = {}
+        if "qwen" in settings.groq_model.lower():
+            # Qwen3 is a hybrid reasoning model — thinking tokens add seconds
+            # of voice latency. Disable reasoning entirely (NFR-1).
+            kwargs["reasoning_effort"] = "none"
         bundle.llm = openai.LLM(
             model=settings.groq_model,
             api_key=settings.groq_api_key,
             base_url="https://api.groq.com/openai/v1",
+            **kwargs,
         )
     elif settings.openai_api_key:
         logger.info(
@@ -155,11 +161,23 @@ class TurnTelemetry:
 
     Latency definitions (all milliseconds):
     - ``stt_final_ms``: end-of-speech -> final user transcript (prefers the
-      LiveKit EOU metric's ``eou_delay``; wall-clock fallback otherwise).
-    - ``llm_first_token_ms``: LLM time-to-first-token metric.
-    - ``tts_first_audio_ms``: TTS time-to-first-audio-byte metric.
+      LiveKit EOU metric ``end_of_utterance_delay + transcription_delay``;
+      wall-clock fallback otherwise).
+    - ``llm_first_token_ms``: LLM time-to-first-token (``LLMMetrics.ttft``).
+    - ``tts_first_audio_ms``: TTS time-to-first-audio-byte (``TTSMetrics.ttfb``).
     - ``e2e_ms``: approximated speech-to-speech =
-      eou_delay + llm_ttfb + tts_ttfb.
+      stt_final + llm_ttfb + tts_ttfb.
+
+    Event wiring for livekit-agents 1.7.0: there is NO ``session.metrics``
+    collector object on AgentSession — the session EMITS a single
+    ``"metrics_collected"`` event whose payload wraps one AgentMetrics object
+    per measurement (``MetricsCollectedEvent.metrics``), typed via its
+    ``type`` discriminator ("eou_metrics" | "llm_metrics" | "tts_metrics").
+    Field names verified against livekit.agents.metrics 1.7.0:
+    EOUMetrics.end_of_utterance_delay/.transcription_delay,
+    LLMMetrics.ttft (-1 when no token), TTSMetrics.ttfb.
+    If the event shape ever changes again, wall-clock fallbacks below keep the
+    columns populated (marked APPROXIMATION).
     """
 
     def __init__(
@@ -198,26 +216,30 @@ class TurnTelemetry:
         self._user_text = ""
         self._agent_text = ""
         self._end_of_speech_at: Optional[float] = None
+        self._reply_start_at: Optional[float] = None
+        self._got_agent_item = False
         self._stt_final_ms: Optional[float] = None
         self._llm_first_token_ms: Optional[float] = None
         self._tts_first_audio_ms: Optional[float] = None
 
     def attach(self) -> None:
-        """Wire session event + metrics callbacks."""
+        """Wire session event + metrics callbacks (livekit-agents >= 1.5)."""
         self._session.on("user_stopped_speaking")(self._on_user_stopped_speaking)
         self._session.on("user_input_transcribed")(self._on_user_input_transcribed)
         self._session.on("conversation_item_added")(self._on_conversation_item_added)
+        self._session.on("agent_started_speaking")(self._on_agent_started_speaking)
         self._session.on("agent_stopped_speaking")(self._on_agent_stopped_speaking)
-        collector = getattr(self._session, "metrics", None)
-        if collector is not None:
-            collector.on("eou_metrics")(self._on_eou_metrics)
-            collector.on("llm_metrics")(self._on_llm_metrics)
-            collector.on("tts_metrics")(self._on_tts_metrics)
+        # 1.7.0 exposes metrics ONLY through this emitted event — there is no
+        # session.metrics collector to subscribe to.
+        self._session.on("metrics_collected")(self._on_metrics_collected)
 
     # -- event handlers ----------------------------------------------------
 
     def _on_user_stopped_speaking(self, *_args: Any) -> None:
-        self._end_of_speech_at = time.monotonic()
+        now = time.monotonic()
+        self._end_of_speech_at = now
+        if self._reply_start_at is None:
+            self._reply_start_at = now
 
     def _on_user_input_transcribed(self, ev: Any) -> None:
         if not getattr(ev, "is_final", False):
@@ -227,6 +249,8 @@ class TurnTelemetry:
             return
         self._user_text = f"{self._user_text} {transcript}".strip()
         self._publish_caption("user", transcript)
+        if self._reply_start_at is None:
+            self._reply_start_at = time.monotonic()
         if self._on_final_user is not None:
             try:
                 result = self._on_final_user(transcript)
@@ -249,9 +273,24 @@ class TurnTelemetry:
         role = str(getattr(item, "role", "")).lower()
         text = str(getattr(item, "text_content", "") or "").strip()
         if role == "assistant" and text:
+            if not self._got_agent_item and self._llm_first_token_ms is None and self._reply_start_at is not None:
+                # APPROXIMATION fallback: item commit time - reply start upper-
+                # bounds true TTFT; used only if llm_metrics never arrived.
+                self._llm_first_token_ms = (
+                    time.monotonic() - self._reply_start_at
+                ) * 1000.0
+            self._got_agent_item = True
             self._agent_text = f"{self._agent_text} {text}".strip()
             self._publish_caption("agent", text)
             self._schedule_flush()
+
+    def _on_agent_started_speaking(self, *_args: Any) -> None:
+        if self._tts_first_audio_ms is None and self._reply_start_at is not None:
+            # APPROXIMATION fallback: covers stt+llm+tts up to first audio;
+            # used only if tts_metrics never arrived.
+            self._tts_first_audio_ms = (
+                time.monotonic() - self._reply_start_at
+            ) * 1000.0
 
     def _schedule_flush(self, delay_s: float = 2.5) -> None:
         """Debounced safety flush so turns persist even if the caller hangs
@@ -276,20 +315,24 @@ class TurnTelemetry:
 
     # -- metrics handlers ---------------------------------------------------
 
-    def _on_eou_metrics(self, m: Any) -> None:
-        delay_seconds = float(getattr(m, "eou_delay", 0.0) or 0.0)
-        if delay_seconds > 0:
-            self._stt_final_ms = delay_seconds * 1000.0
-
-    def _on_llm_metrics(self, m: Any) -> None:
-        ttfb_seconds = float(getattr(m, "ttfb", 0.0) or 0.0)
-        if ttfb_seconds > 0:
-            self._llm_first_token_ms = ttfb_seconds * 1000.0
-
-    def _on_tts_metrics(self, m: Any) -> None:
-        ttfb_seconds = float(getattr(m, "ttfb", 0.0) or 0.0)
-        if ttfb_seconds > 0:
-            self._tts_first_audio_ms = ttfb_seconds * 1000.0
+    def _on_metrics_collected(self, ev: Any) -> None:
+        """Single dispatcher for the wrapped AgentMetrics objects (1.7.0)."""
+        metrics = getattr(ev, "metrics", ev)  # unwrap MetricsCollectedEvent
+        metric_type = str(getattr(metrics, "type", "") or "")
+        if metric_type == "eou_metrics":
+            delay_s = float(
+                getattr(metrics, "end_of_utterance_delay", 0.0) or 0.0
+            ) + float(getattr(metrics, "transcription_delay", 0.0) or 0.0)
+            if delay_s > 0:
+                self._stt_final_ms = delay_s * 1000.0
+        elif metric_type == "llm_metrics":
+            ttft_seconds = float(getattr(metrics, "ttft", -1.0))
+            if ttft_seconds > 0:
+                self._llm_first_token_ms = ttft_seconds * 1000.0
+        elif metric_type == "tts_metrics":
+            ttfb_seconds = float(getattr(metrics, "ttfb", 0.0) or 0.0)
+            if ttfb_seconds > 0:
+                self._tts_first_audio_ms = ttfb_seconds * 1000.0
 
     # -- flushing ------------------------------------------------------------
 
@@ -568,6 +611,12 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             llm=bundle.llm,
             tts=bundle.tts,
             vad=silero.VAD.load(),
+            # Local VAD turn detection: skips the LiveKit cloud detector whose
+            # 401 retries stalled every session start by ~4s.
+            turn_detection="vad",
+            # Snappier endpointing than defaults (NFR-1: median <=900ms).
+            min_endpointing_delay=0.35,
+            max_endpointing_delay=1.5,
         )
         telemetry = TurnTelemetry(
             session=session,

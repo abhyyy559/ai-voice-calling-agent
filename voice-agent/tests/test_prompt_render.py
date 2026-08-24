@@ -54,8 +54,17 @@ EXTRACTION_HEADER_HINT = "RECORDING ANSWERS"
 
 
 def _first_question_marker_index(prompt: str) -> int | None:
-    match = re.search(r"(?m)^\s*1\s*[.)]\s", _goals_section(prompt))
-    return match.start() if match else None
+    """Index of the '1.' goal marker in NORMALIZED full-prompt coordinates,
+    comparable with other normalize(prompt) indices (normalize collapses
+    newlines, so the marker is matched without line anchors)."""
+    norm = normalize(prompt)
+    start = norm.find(normalize(QUESTIONS_HEADER_HINT))
+    if start == -1:
+        return None
+    end = norm.find(normalize(EXTRACTION_HEADER_HINT))
+    window = norm[start : end if end > start else len(norm)]
+    match = re.search(r"\b1\s*[.)]\s", window)
+    return start + match.start() if match else None
 
 
 def test_disclosure_is_the_first_block(render: Callable[..., str]) -> None:
