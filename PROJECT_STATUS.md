@@ -81,3 +81,11 @@ docker compose -f infra/docker-compose.yml up -d --build   # everything
 login: demo@example.com / demo1234
 E2E test: voice-agent\.venv\Scripts\python.exe scripts\e2e_caller.py --wav caller.wav --wav2 caller2.wav --hold 60
 ```
+
+## Update 2026-08-25
+- [x] P0-3 guardrails block live in all prompts
+- [x] P0-4 partial captions streaming (final:false on partials)
+- [x] P1 healthcheck IPv6 fix (frontend now healthy)
+- [x] Cleanup executed per approval (logs, dist untracked, test_validate.py removed; .gitignore hardened)
+- [ ] Still open this phase: P0-1 STT endpointing tuning, P0-2 personalized opening + parent-verify wiring, P0-5 Groq Dev tier (owner), P1 cost dashboard + export v2 + landing motion pass; parallel-calls demo waits on Twilio keys.
+

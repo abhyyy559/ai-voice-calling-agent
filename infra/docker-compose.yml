@@ -166,8 +166,9 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      # nginx:alpine ships busybox wget.
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/index.html"]
+      # busybox wget targets 127.0.0.1: localhost resolves to ::1 first and
+      # nginx here listens on IPv4 only, which made the container look unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/index.html"]
       interval: 15s
       timeout: 5s
       retries: 6

@@ -221,13 +221,13 @@ class TurnTelemetry:
         self._flush_lock = asyncio.Lock()
         self._reset()
 
-    def _publish_caption(self, speaker: str, text: str) -> None:
+    def _publish_caption(self, speaker: str, text: str, final: bool = True) -> None:
         """Stream a live caption to the browser over the room data channel."""
         if self._room is None or not text.strip():
             return
         try:
             payload = json.dumps(
-                {"type": "caption", "speaker": speaker, "text": text}
+                {"type": "caption", "speaker": speaker, "text": text, "final": final}
             ).encode("utf-8")
             loop = asyncio.get_event_loop()
             loop.create_task(
@@ -266,9 +266,13 @@ class TurnTelemetry:
             self._reply_start_at = now
 
     def _on_user_input_transcribed(self, ev: Any) -> None:
-        if not getattr(ev, "is_final", False):
-            return
         transcript = str(getattr(ev, "transcript", "") or "").strip()
+        is_final = bool(getattr(ev, "is_final", False))
+        if transcript:
+            # Stream PARTIAL captions too so the browser transcript feels live.
+            self._publish_caption("user", transcript, final=is_final)
+        if not is_final:
+            return
         if not transcript:
             return
         self._user_text = f"{self._user_text} {transcript}".strip()
