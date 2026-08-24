@@ -51,7 +51,7 @@ function emptyConfig() {
     ],
     questionFlow: [{ question: '', expectedField: '' }],
     extractionRows: [{ name: '', type: 'string', description: '', required: false, threshold: 0.6 }],
-    voice: { tts_voice_id: '', speaking_rate: 1.0, stt_language: 'en' },
+    voice: { tts_voice_id: '', speaking_rate: 1.0, stt_language: 'en', llm_model: '' },
   };
 }
 
@@ -789,17 +789,19 @@ export default function AgentBuilderPage() {
                   )}
                 </ul>
               </div>
-              <div className="review-block">
-                <h4>Voice</h4>
-                <dl>
-                  <dt>Voice</dt>
-                  <dd>{config.voice.tts_voice_id || 'provider default'}</dd>
-                  <dt>Rate</dt>
-                  <dd>{config.voice.speaking_rate}</dd>
-                  <dt>Language</dt>
-                  <dd>{config.voice.stt_language}</dd>
-                </dl>
-              </div>
+                <div className="review-block">
+                  <h4>Voice</h4>
+                  <dl>
+                    <dt>Voice</dt>
+                    <dd>{config.voice.tts_voice_id || 'provider default'}</dd>
+                    <dt>Model</dt>
+                    <dd>{config.voice.llm_model || 'platform default'}</dd>
+                    <dt>Rate</dt>
+                    <dd>{config.voice.speaking_rate}</dd>
+                    <dt>Language</dt>
+                    <dd>{config.voice.stt_language}</dd>
+                  </dl>
+                </div>
             </div>
 
             {versionCountHint && <p className="hint">{versionCountHint}</p>}
@@ -870,6 +872,7 @@ function hydrateFromVersion(v) {
       tts_voice_id: '',
       speaking_rate: 1.0,
       stt_language: 'en',
+      llm_model: '',
       ...(v.voice_settings || {}),
     },
   };

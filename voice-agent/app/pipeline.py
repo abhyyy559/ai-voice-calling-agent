@@ -103,9 +103,29 @@ class ProviderBundle:
         return self.stt is not None and self.llm is not None and self.tts is not None
 
 
-def build_providers(settings: Settings) -> ProviderBundle:
-    """Build STT/LLM/TTS from settings; missing keys degrade, never raise."""
+def _voice_overrides(voice_settings: Optional[Mapping[str, Any]]) -> tuple[str, str]:
+    """Extract (llm_model, tts_voice_id) overrides saved with an agent version.
+
+    Both fall back to empty strings, meaning "use the platform default".
+    """
+    vs = voice_settings or {}
+    llm_model = str(vs.get("llm_model") or "").strip()
+    tts_voice = str(vs.get("tts_voice_id") or "").strip()
+    return llm_model, tts_voice
+
+
+def build_providers(
+    settings: Settings,
+    voice_settings: Optional[Mapping[str, Any]] = None,
+) -> ProviderBundle:
+    """Build STT/LLM/TTS from settings; missing keys degrade, never raise.
+
+    ``voice_settings`` is the agent-version's saved config; when it carries a
+    per-agent ``llm_model`` / ``tts_voice_id`` those override the platform
+    defaults (GROQ_MODEL env / provider default voice).
+    """
     bundle = ProviderBundle(stt=None, llm=None, tts=None)
+    model_override, tts_voice_override = _voice_overrides(voice_settings)
 
     if settings.deepgram_api_key:
         bundle.stt = deepgram.STT(
@@ -117,20 +137,24 @@ def build_providers(settings: Settings) -> ProviderBundle:
         )
 
     if settings.cartesia_api_key:
-        bundle.tts = cartesia.TTS(api_key=settings.cartesia_api_key)
+        tts_kwargs: dict[str, Any] = {}
+        if tts_voice_override:
+            tts_kwargs["voice"] = tts_voice_override
+        bundle.tts = cartesia.TTS(api_key=settings.cartesia_api_key, **tts_kwargs)
     else:
         bundle.problems.append("CARTESIA_API_KEY missing - text-to-speech disabled")
 
+    groq_model = model_override or settings.groq_model
     if settings.groq_api_key:
         # livekit-agents 1.7.0 has no LLM.with_groq classmethod — Groq is an
         # OpenAI-compatible endpoint, so construct it explicitly.
         kwargs: dict[str, Any] = {}
-        if "qwen" in settings.groq_model.lower():
+        if "qwen" in groq_model.lower():
             # Qwen3 is a hybrid reasoning model — thinking tokens add seconds
             # of voice latency. Disable reasoning entirely (NFR-1).
             kwargs["reasoning_effort"] = "none"
         bundle.llm = openai.LLM(
-            model=settings.groq_model,
+            model=groq_model,
             api_key=settings.groq_api_key,
             base_url="https://api.groq.com/openai/v1",
             **kwargs,
@@ -573,7 +597,18 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             await _degrade(ctx, backend, call_id, settings, reason)
             return
 
-        bundle = build_providers(settings)
+        # Load config (cached 30s server-side here via BackendClient) BEFORE
+        # constructing providers: a saved voice_settings.llm_model /
+        # tts_voice_id must override the platform defaults.
+        try:
+            config: Mapping[str, Any] = await backend.get_agent_config(parsed.version_id)
+        except BackendError as exc:
+            await _degrade(
+                ctx, backend, call_id, settings, f"failed to load agent config: {exc}"
+            )
+            return
+
+        bundle = build_providers(settings, config.get("voice_settings"))
         for problem in bundle.problems:
             logger.error("Provider problem: %s", problem)
         if not bundle.complete:
@@ -583,15 +618,6 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             return
         assert bundle.stt is not None and bundle.llm is not None
         assert bundle.tts is not None
-
-        # Load config (cached 30s server-side here via BackendClient).
-        try:
-            config: Mapping[str, Any] = await backend.get_agent_config(parsed.version_id)
-        except BackendError as exc:
-            await _degrade(
-                ctx, backend, call_id, settings, f"failed to load agent config: {exc}"
-            )
-            return
 
         instructions = render_system_prompt(config)
         coordinator = ExtractionCoordinator(

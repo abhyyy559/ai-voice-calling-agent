@@ -7,19 +7,92 @@ const LANGUAGES = [
 ];
 
 /**
+ * Curated Cartesia English voices (sonic family, verified preset IDs from
+ * docs.cartesia.ai). Written to voice_settings.tts_voice_id; an empty value
+ * means "use the provider default voice".
+ */
+export const VOICE_PRESETS = [
+  {
+    id: '',
+    name: 'Platform default',
+    detail: 'Let VocalIQ pick a clear natural voice',
+  },
+  {
+    id: 'f786b574-daa5-4673-aa0c-cbe3e8534c02',
+    name: 'Katie',
+    detail: 'US female · stable & realistic (recommended for agents)',
+  },
+  {
+    id: 'a0e99841-438c-4a64-b679-ae501e7d6091',
+    name: 'Sarah',
+    detail: 'US female · clear & professional',
+  },
+  {
+    id: 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4',
+    name: 'Skylar',
+    detail: 'US female · friendly guide tone',
+  },
+  {
+    id: 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+    name: 'Jameson',
+    detail: 'US male · warm & steady',
+  },
+  {
+    id: '228fca29-3a0a-435c-8728-5cb483251068',
+    name: 'Kiefer',
+    detail: 'US male · calm announcer',
+  },
+  {
+    id: '62ae83ad-4f6a-430b-af41-a9bede9286ca',
+    name: 'Gemma',
+    detail: 'UK female · polished British accent',
+  },
+  {
+    id: 'ef191366-f52f-447a-a398-ed8c0f2943a1',
+    name: 'Archie',
+    detail: 'UK male · confident British accent',
+  },
+  {
+    id: '6ccbfb76-1fc6-48f7-b71d-91ac6298247b',
+    name: 'Tessa',
+    detail: 'US female · expressive & emotive',
+  },
+];
+
+/** LLM choices saved to voice_settings.llm_model ('' = platform default). */
+export const LLM_MODEL_CHOICES = [
+  { value: '', label: 'Platform default (fast)' },
+  {
+    value: 'qwen/qwen3.6-27b',
+    label: 'Qwen 3.6 27B — recommended · fastest responses',
+  },
+  {
+    value: 'openai/gpt-oss-120b',
+    label: 'GPT-OSS 120B — strongest reasoning',
+  },
+];
+
+/**
  * Voice settings form.
  *
  * Shape kept in sync with the voice-agent runtime:
- *   { tts_voice_id?: string, speaking_rate?: number, stt_language?: string }
- * An empty TTS voice id means "use the provider default voice".
+ *   { tts_voice_id?: string, speaking_rate?: number, stt_language?: string,
+ *     llm_model?: string }
+ * An empty TTS voice id / llm model means "use the platform default".
  */
 export default function VoiceSettingsForm({ value, onChange, error }) {
   const settings = {
     tts_voice_id: '',
     speaking_rate: 1.0,
     stt_language: 'en',
+    llm_model: '',
     ...(value || {}),
   };
+
+  const knownVoice = VOICE_PRESETS.some((p) => p.id === (settings.tts_voice_id || ''));
+  const [showCustomVoice, setShowCustomVoice] = React.useState(false);
+  const customInputVisible =
+    showCustomVoice || (!knownVoice && Boolean(settings.tts_voice_id));
 
   function update(patch) {
     onChange({ ...settings, ...patch });
@@ -30,17 +103,65 @@ export default function VoiceSettingsForm({ value, onChange, error }) {
       {error && <div className="banner banner-error">{error}</div>}
 
       <div className="field">
-        <label htmlFor="vs-voice">TTS voice ID</label>
-        <input
+        <label htmlFor="vs-voice">Voice</label>
+        <select
           id="vs-voice"
-          type="text"
-          value={settings.tts_voice_id || ''}
-          placeholder="Leave blank to use the provider's default voice"
-          onChange={(e) => update({ tts_voice_id: e.target.value })}
-        />
+          value={customInputVisible && !knownVoice ? settings.tts_voice_id : settings.tts_voice_id || ''}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === '__custom__') {
+              setShowCustomVoice(true);
+              return;
+            }
+            setShowCustomVoice(false);
+            update({ tts_voice_id: v });
+          }}
+        >
+          {!knownVoice && settings.tts_voice_id && (
+            <option value={settings.tts_voice_id}>Custom voice…</option>
+          )}
+          {VOICE_PRESETS.map((p) => (
+            <option key={p.id || 'default'} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+          <option value="__custom__">Custom voice ID…</option>
+        </select>
         <p className="hint">
-          The speech engine's voice identifier. If you are not sure, leave this blank — the platform picks a clear
-          natural voice for you.
+          {(() => {
+            const preset = VOICE_PRESETS.find((p) => p.id === (settings.tts_voice_id || ''));
+            if (preset) return preset.detail;
+            return 'Paste any Cartesia voice ID below.';
+          })()}
+        </p>
+        {customInputVisible && (
+          <input
+            type="text"
+            aria-label="Custom TTS voice ID"
+            placeholder="Cartesia voice ID (UUID)"
+            value={settings.tts_voice_id || ''}
+            onChange={(e) => update({ tts_voice_id: e.target.value })}
+            style={{ marginTop: 8 }}
+          />
+        )}
+      </div>
+
+      <div className="field">
+        <label htmlFor="vs-model">Conversation model</label>
+        <select
+          id="vs-model"
+          value={settings.llm_model || ''}
+          onChange={(e) => update({ llm_model: e.target.value })}
+        >
+          {LLM_MODEL_CHOICES.map((m) => (
+            <option key={m.value || 'default'} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        <p className="hint">
+          Powers how the agent understands replies. The fast default keeps call latency low; switch models only if
+          answers feel too simple.
         </p>
       </div>
 
@@ -89,6 +210,8 @@ export function normalizeVoiceSettings(value) {
     stt_language: s.stt_language || 'en',
   };
   const voice = String(s.tts_voice_id || '').trim();
-  if (voice) out.tts_voice_id = voice;
+  if (voice && voice !== '__custom__') out.tts_voice_id = voice;
+  const model = String(s.llm_model || '').trim();
+  if (model) out.llm_model = model;
   return out;
 }
