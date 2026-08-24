@@ -16,6 +16,11 @@ import sys
 import urllib.request
 import wave
 
+try:
+    from livekit import rtc  # noqa: F401  (used by play_wav)
+except ImportError:
+    rtc = None
+
 
 def http_json(method: str, url: str, body: dict | None = None, token: str | None = None):
     req = urllib.request.Request(url, method=method)
@@ -27,7 +32,37 @@ def http_json(method: str, url: str, body: dict | None = None, token: str | None
         return json.loads(resp.read().decode())
 
 
-async def run(room_url: str, token: str, wav_path: str, hold_s: int) -> int:
+async def play_wav(src: rtc.AudioSource, wav_path: str) -> None:
+    with wave.open(wav_path, "rb") as w:
+        rate = w.getframerate()
+        channels = w.getnchannels()
+        width = w.getsampwidth()
+        raw = w.readframes(w.getnframes())
+    samples_per_frame = rate // 50  # 20ms frames
+    bytes_per_frame = samples_per_frame * channels * width
+    for i in range(0, len(raw), bytes_per_frame):
+        chunk = raw[i : i + bytes_per_frame]
+        if not chunk:
+            break
+        if len(chunk) < bytes_per_frame:
+            chunk = chunk.ljust(bytes_per_frame, b"\x00")
+        frame = rtc.AudioFrame(
+            chunk,
+            sample_rate=rate,
+            num_channels=channels,
+            samples_per_channel=samples_per_frame,
+        )
+        await src.capture_frame(frame)
+        await asyncio.sleep(0.02)
+
+
+async def run(
+    room_url: str,
+    token: str,
+    wav_path: str,
+    hold_s: int,
+    wav2_path: str | None = None,
+) -> int:
     from livekit import rtc
 
     room = rtc.Room()
@@ -72,25 +107,10 @@ async def run(room_url: str, token: str, wav_path: str, hold_s: int) -> int:
     await room.local_participant.publish_track(track, opts)
     print("[PUBLISHED] mic track with SOURCE_MICROPHONE")
 
-    samples_per_frame = rate // 50  # 20ms frames
-    bytes_per_frame = samples_per_frame * channels * width
-    for i in range(0, len(raw), bytes_per_frame):
-        chunk = raw[i : i + bytes_per_frame]
-        if not chunk:
-            break
-        if len(chunk) < bytes_per_frame:
-            chunk = chunk.ljust(bytes_per_frame, b"\x00")
-        frame = rtc.AudioFrame(
-            chunk,
-            sample_rate=rate,
-            num_channels=channels,
-            samples_per_channel=samples_per_frame,
-        )
-        await src.capture_frame(frame)
-        await asyncio.sleep(0.02)
+    await play_wav(src, wav_path)
     print("[PUBLISHED] caller utterance done; waiting for agent...")
 
-    # Wait specifically for the AGENT to reply (user captions alone don't count).
+    # Wait for the AGENT to reply, then optionally play a second turn.
     got_agent_caption = False
     waited = 0
     while waited < hold_s:
@@ -98,8 +118,18 @@ async def run(room_url: str, token: str, wav_path: str, hold_s: int) -> int:
         waited += 1
         if any('"speaker": "agent"' in c or '"speaker":"agent"' in c for c in captions):
             got_agent_caption = True
-            await asyncio.sleep(6)  # let TTS finish + telemetry flush
             break
+
+    if wav2_path and got_agent_caption:
+        await asyncio.sleep(2)
+        await play_wav(src, wav2_path)
+        print("[PUBLISHED] second caller utterance done")
+        # Give the agent time to extract fields and wrap up.
+        for extra in range(45):
+            await asyncio.sleep(1)
+            if '"speaker": "agent"' in " ".join(captions[-3:]) or extra > 40:
+                pass
+        await asyncio.sleep(8)
 
     print(
         f"[RESULT] captions={len(captions)} agent_audio_bytes={len(agent_audio_bytes)} "
@@ -120,6 +150,7 @@ def main() -> int:
     parser.add_argument("--password", default="demo1234")
     parser.add_argument("--version-id", type=int, default=1)
     parser.add_argument("--wav", required=True)
+    parser.add_argument("--wav2", default=None)
     parser.add_argument("--hold", type=int, default=35)
     args = parser.parse_args()
 
@@ -137,7 +168,9 @@ def main() -> int:
     call_id, room_name = sess["call_id"], sess["room_name"]
     print(f"[SESSION] call_id={call_id} room={room_name}")
 
-    exit_code = asyncio.run(run(sess["livekit_url"], sess["livekit_token"], args.wav, args.hold))
+    exit_code = asyncio.run(
+        run(sess["livekit_url"], sess["livekit_token"], args.wav, args.hold, args.wav2)
+    )
 
     # Worker flushes turns on a short debounce after the reply — poll patiently.
     done = {"transcript": [], "extracted_fields": []}

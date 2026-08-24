@@ -36,8 +36,25 @@ def render() -> Callable[..., str]:
     return fn
 
 
+def _goals_section(prompt: str) -> str:
+    """Slice the prompt between the goals header and extraction header.
+
+    Numbered content elsewhere (disclosure scripts, company context) is
+    legitimate; question-flow numbering is only asserted within its own block.
+    """
+    start = prompt.find(QUESTIONS_HEADER_HINT)
+    end = prompt.find(EXTRACTION_HEADER_HINT)
+    if start == -1:
+        return prompt
+    return prompt[start : end if end > start else len(prompt)]
+
+
+QUESTIONS_HEADER_HINT = "YOUR GOALS"
+EXTRACTION_HEADER_HINT = "RECORDING ANSWERS"
+
+
 def _first_question_marker_index(prompt: str) -> int | None:
-    match = re.search(r"(?m)^\s*1\s*[.)]\s", prompt)
+    match = re.search(r"(?m)^\s*1\s*[.)]\s", _goals_section(prompt))
     return match.start() if match else None
 
 
@@ -72,14 +89,16 @@ def test_questions_are_numbered_in_order(render: Callable[..., str]) -> None:
     norm_prompt = normalize(prompt)
 
     positions: list[int] = []
+    goals = _goals_section(prompt)
+    norm_goals = normalize(goals)
     for step, entry in enumerate(config["question_flow"], start=1):
-        marker = re.search(rf"(?m)^\s*{step}\s*[.)]\s", prompt)
+        marker = re.search(rf"(?m)^\s*{step}\s*[.)]\s", goals)
         assert marker is not None, (
-            f"question step {step} has no '{step}.' number marker in:\n{prompt[:600]!r}"
+            f"question step {step} has no '{step}.' number marker in:\n{goals[:600]!r}"
         )
         positions.append(marker.start())
         question_text = normalize(entry["question"])
-        window = norm_prompt[marker.start():marker.start() + 500]
+        window = norm_goals[marker.start() : marker.start() + 500]
         key_words = " ".join(question_text.split()[:5])
         assert key_words in window, (
             f"question {step} text ({key_words!r}) not found near its marker; "

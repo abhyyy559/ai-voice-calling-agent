@@ -98,8 +98,8 @@ class BackendClient:
         self, call_id: str, fields: list[Mapping[str, Any]]
     ) -> bool:
         """Append extracted-field rows. Returns success."""
-        return await self._post_json_array(
-            f"/internal/calls/{call_id}/extracted-fields", fields
+        return await self._post_json_object(
+            f"/internal/calls/{call_id}/extracted-fields", {"fields": fields}
         )
 
     async def post_complete(
@@ -140,6 +140,17 @@ class BackendClient:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             logger.error("POST %s failed (%d items): %s", path, len(items), exc)
+            return False
+        return True
+
+    async def _post_json_object(
+        self, path: str, payload: Mapping[str, Any]
+    ) -> bool:
+        try:
+            response = await self._client.post(f"{self._base_url}{path}", json=dict(payload))
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error("POST %s failed: %s", path, exc)
             return False
         return True
 

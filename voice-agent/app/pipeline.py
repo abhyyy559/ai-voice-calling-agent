@@ -168,11 +168,13 @@ class TurnTelemetry:
         backend: BackendClient,
         call_id: str,
         room: Any = None,
+        on_final_user: Any = None,
     ) -> None:
         self._session = session
         self._backend = backend
         self._call_id = call_id
         self._room = room
+        self._on_final_user = on_final_user
         self._turn_index = 0
         self._flush_lock = asyncio.Lock()
         self._reset()
@@ -225,6 +227,15 @@ class TurnTelemetry:
             return
         self._user_text = f"{self._user_text} {transcript}".strip()
         self._publish_caption("user", transcript)
+        if self._on_final_user is not None:
+            try:
+                result = self._on_final_user(transcript)
+                if asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
+                else:
+                    logger.info("heuristic_extract captured=%s", result)
+            except Exception:
+                logger.exception("on_final_user callback failed")
         if self._end_of_speech_at is not None:
             elapsed_ms = (time.monotonic() - self._end_of_speech_at) * 1000.0
             # Keep the first measurement for this exchange; EOU metric refines it.
@@ -370,10 +381,10 @@ class DomainCallAgent(Agent):
 
     def __init__(self, instructions: str, tools_impl: VoiceAgentTools) -> None:
         self._tools_impl = tools_impl
-        super().__init__(
-            instructions=instructions,
-            tools=[],
-        )
+        # NOTE: do NOT pass tools= here — livekit-agents auto-collects the
+        # @function_tool-decorated methods below; passing them again raises
+        # "duplicate function name".
+        super().__init__(instructions=instructions)
 
     @function_tool
     async def record_extracted_field(
@@ -545,7 +556,12 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
             max_asks_per_field=MAX_ASKS_PER_FIELD,
         )
-        tools_impl = VoiceAgentTools(coordinator, backend, call_id)
+        tools_impl = VoiceAgentTools(
+            coordinator,
+            backend,
+            call_id,
+            schema=config.get("extraction_schema") or {},
+        )
 
         session = AgentSession(
             stt=bundle.stt,
@@ -554,7 +570,11 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             vad=silero.VAD.load(),
         )
         telemetry = TurnTelemetry(
-            session=session, backend=backend, call_id=call_id, room=ctx.room
+            session=session,
+            backend=backend,
+            call_id=call_id,
+            room=ctx.room,
+            on_final_user=tools_impl.heuristic_extract,
         )
         telemetry.attach()
 

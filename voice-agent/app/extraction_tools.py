@@ -142,10 +142,50 @@ class VoiceAgentTools:
         coordinator: ExtractionCoordinator,
         backend: ExtractionBackend,
         call_id: str,
+        schema: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._coordinator = coordinator
         self._backend = backend
         self._call_id = call_id
+        self._schema = schema or {}
+
+    async def heuristic_extract(self, transcript: str) -> int:
+        """Deterministic safety-net extraction (FR-12 companion).
+
+        For every schema field the LLM has NOT recorded, scan the final user
+        transcript for sentences whose words overlap the field name or its
+        description; record the best sentence at modest confidence so a value
+        is never lost just because the model skipped its tool call.
+        Returns how many fields were captured.
+        """
+        import re
+
+        text = (transcript or "").strip()
+        if not text:
+            return 0
+        captured = 0
+        recorded = set(self._coordinator.recorded.keys())
+        for field_name, spec in self._schema.items():
+            if field_name in recorded:
+                continue
+            cue_words: set[str] = {w.lower() for w in re.split(r"[^a-z0-9]+", field_name) if len(w) > 3}
+            description = ""
+            if isinstance(spec, dict):
+                description = str(spec.get("description") or "")
+            cue_words |= {w.lower() for w in re.split(r"[^a-z0-9]+", description) if len(w) > 3}
+            if not cue_words:
+                continue
+            for sentence in re.split(r"(?<=[.!?])\s+|,\s+", text):
+                words = set(re.findall(r"[a-z0-9']+", sentence.lower()))
+                if words & cue_words:
+                    await self.record_extracted_field(
+                        field_name,
+                        sentence.strip(" ."),
+                        0.7,
+                    )
+                    captured += 1
+                    break
+        return captured
 
     async def record_extracted_field(
         self,
