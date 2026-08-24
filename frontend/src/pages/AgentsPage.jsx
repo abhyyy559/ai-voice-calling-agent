@@ -1,22 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { agentsApi } from '../api.js';
-import StatusBadge from '../components/StatusBadge.jsx';
-import DataTable from '../components/DataTable.jsx';
 
-function fmtDateTime(value) {
-  if (!value) return '—';
+function fmtDate(value) {
+  if (!value) return '';
   const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/**
+ * Agents — Vapi/Retell-style card grid. Each card: status dot, name,
+ * current-version chip, description and Test / Configure actions.
+ */
 export default function AgentsPage() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState(null);
@@ -50,7 +46,7 @@ export default function AgentsPage() {
                   [a.id]: { version: latest.version, created_at: latest.created_at },
                 }));
               } catch {
-                /* leave '—'; the row still renders */
+                /* leave the card without a chip; it still renders */
               }
             })
         );
@@ -66,54 +62,7 @@ export default function AgentsPage() {
     };
   }, [nonce]);
 
-  const columns = [
-    {
-      key: 'name',
-      label: 'Agent',
-      render: (a) => (
-        <div>
-          <span className="cell-strong">{a.name}</span>
-          <div className="agent-desc-cell">{a.description || <span className="text-muted">No description</span>}</div>
-        </div>
-      ),
-    },
-    { key: 'status', label: 'Status', render: (a) => <StatusBadge status={a.status} /> },
-    {
-      key: 'version',
-      label: 'Current version',
-      render: (a) => {
-        const info = versionInfo[a.id];
-        if (!info) return a.current_version_id != null ? <span className="chip">#{a.current_version_id}</span> : <span className="text-muted">Not saved</span>;
-        return (
-          <span className="chip">
-            v{info.version}
-          </span>
-        );
-      },
-    },
-    { key: 'updated_at', label: 'Updated', render: (a) => fmtDateTime(a.updated_at), className: 'nowrap' },
-    {
-      key: 'actions',
-      label: '',
-      className: 'nowrap',
-      render: (a) => (
-        <div className="row-actions" onClick={(e) => e.stopPropagation()}>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={() => navigate(`/agents/${a.id}/edit`)}>
-            Edit
-          </button>
-          {a.current_version_id != null && (
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => navigate(`/playground/${a.current_version_id}`)}
-            >
-              Test
-            </button>
-          )}
-        </div>
-      ),
-    },
-  ];
+  const hasAgents = !loading && agents && agents.length > 0;
 
   return (
     <div>
@@ -139,25 +88,78 @@ export default function AgentsPage() {
         </div>
       )}
 
-      <div className="card flush">
-        <DataTable
-          columns={columns}
-          rows={agents || []}
-          rowKey={(a) => a.id}
-          onRowClick={(a) => navigate(`/agents/${a.id}/edit`)}
-          loading={loading}
-          empty="No agents yet. Create your first agent to start building a call flow."
-          emptyAction={
-            <button type="button" className="btn btn-primary" onClick={() => navigate('/agents/new')}>
-              + Create your first agent
-            </button>
-          }
-        />
-      </div>
+      {loading && (
+        <div className="loading-page">
+          <span className="spinner" /> Loading agents…
+        </div>
+      )}
 
-      {!loading && agents && agents.length > 0 && (
-        <p className="hint">
-          Tip: an agent becomes callable once you save at least one version from the builder wizard.
+      {!loading && agents && agents.length === 0 && (
+        <div className="card">
+          <div className="empty-state">
+            No agents yet. Create your first agent to start building a call flow.
+            <div className="form-actions">
+              <button type="button" className="btn btn-primary" onClick={() => navigate('/agents/new')}>
+                + Create your first agent
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {hasAgents && (
+        <div className="agents-grid">
+          {agents.map((a) => {
+            const info = versionInfo[a.id];
+            return (
+              <div key={a.id} className="card agent-card">
+                <div className="agent-card-head">
+                  <span className={`status-dot dot-${a.status || 'draft'}`}>{a.status || 'draft'}</span>
+                  {info ? (
+                    <span className="version-chip">v{info.version}</span>
+                  ) : a.current_version_id != null ? (
+                    <span className="version-chip">#{a.current_version_id}</span>
+                  ) : (
+                    <span className="chip">no version</span>
+                  )}
+                </div>
+                <div>
+                  <div className="agent-name">{a.name || 'Untitled agent'}</div>
+                  <p className="agent-card-desc">{a.description || 'No description yet.'}</p>
+                </div>
+                <div className="agent-card-meta">
+                  <span className="text-muted" style={{ fontSize: 12 }}>
+                    {info && info.created_at ? `saved ${fmtDate(info.created_at)}` : `updated ${fmtDate(a.updated_at)}`}
+                  </span>
+                </div>
+                <div className="agent-card-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={a.current_version_id == null}
+                    title={
+                      a.current_version_id == null
+                        ? 'Save at least one version from the builder to test'
+                        : 'Talk or type with this agent in the Playground'
+                    }
+                    onClick={() => navigate(`/playground/${a.current_version_id}`)}
+                  >
+                    Test
+                  </button>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => navigate(`/agents/${a.id}`)}>
+                    Configure
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {hasAgents && (
+        <p className="hint" style={{ marginTop: 16 }}>
+          Tip: an agent becomes callable once you save at least one version — every save snapshots a new immutable
+          version.
         </p>
       )}
     </div>

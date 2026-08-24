@@ -4,6 +4,7 @@ import { Room, RoomEvent, Track } from 'livekit-client';
 import { agentsApi, playgroundApi } from '../api.js';
 import TranscriptView from '../components/TranscriptView.jsx';
 import LatencyPanel from '../components/LatencyPanel.jsx';
+import TextPlayground, { confidenceClass } from '../components/TextPlayground.jsx';
 
 const PHASES = {
   SETUP: 'setup',
@@ -24,13 +25,6 @@ const BARGE_DECAY_MS = 650;
 function fmtClock(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
-
-function confidenceClass(v) {
-  const n = typeof v === 'number' ? v : Number(v);
-  if (v == null || Number.isNaN(n)) return '';
-  const pct = n <= 1 ? n * 100 : n;
-  return pct >= 80 ? 'chip-green' : pct >= 50 ? 'badge-amber' : 'chip-red';
 }
 
 export default function PlaygroundPage() {
@@ -59,15 +53,9 @@ export default function PlaygroundPage() {
   const [bargeIn, setBargeIn] = useState(false);
   const [captions, setCaptions] = useState([]);
 
-  // ---- text session ----
-  const [chatMessages, setChatMessages] = useState([]); // [{speaker:'caller'|'agent', text}]
-  const [chatInput, setChatInput] = useState('');
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatError, setChatError] = useState(null);
-  const [chatDone, setChatDone] = useState(false);
-  const [liveFields, setLiveFields] = useState([]); // extracted so far
-
   // ---- post-call ----
+  // Text-mode session state lives inside <TextPlayground>; the page only
+  // keeps the finished report for the ENDED view.
   const [result, setResult] = useState(null);
   const [completeError, setCompleteError] = useState(null);
   const [completing, setCompleting] = useState(false);
@@ -406,105 +394,14 @@ export default function PlaygroundPage() {
     setCaptions([]);
     setElapsedMs(0);
     setBargeIn(false);
-    // text mode
-    setChatMessages([]);
-    setChatInput('');
-    setChatBusy(false);
-    setChatError(null);
-    setChatDone(false);
-    setLiveFields([]);
     setPhase(PHASES.SETUP);
   }
 
   // ------------------------------------------------------- text mode handlers
-
-  function applyTurnResponse(res) {
-    if (!res) return;
-    if (res.reply_text) {
-      setChatMessages((prev) => [...prev, { speaker: 'agent', text: res.reply_text }]);
-    }
-    if (Array.isArray(res.extracted_fields) && res.extracted_fields.length > 0) {
-      setLiveFields((prev) => {
-        const byName = new Map(prev.map((f) => [f.field_name, f]));
-        res.extracted_fields.forEach((f) => byName.set(f.field_name, f));
-        return Array.from(byName.values());
-      });
-    }
-    if (res.done) setChatDone(true);
-  }
-
-  async function startTextCall() {
-    if (!selectedVersionId || chatBusy) return;
-    setResult(null);
-    setFatalError(null);
-    setConnectError(null);
-    setChatMessages([]);
-    setLiveFields([]);
-    setChatDone(false);
-    setChatError(null);
-    userEndedRef.current = false;
-
-    let sess = null;
-    try {
-      sess = await playgroundApi.startSession(Number(selectedVersionId));
-      sessionRef.current = sess; // same record shape as voice mode
-    } catch (e) {
-      setConnectError(e.message || 'Could not start a playground session.');
-      return;
-    }
-
-    setPhase(PHASES.TEXT); // no LiveKit join — straight to the chat panel
-    setChatBusy(true);
-    try {
-      const res = await playgroundApi.sendTurn(sess.call_id, { event: 'start' });
-      applyTurnResponse(res);
-    } catch (e) {
-      setChatError(e.message || 'The agent could not start the conversation.');
-    } finally {
-      setChatBusy(false);
-    }
-  }
-
-  async function sendText(e) {
-    e.preventDefault();
-    const text = chatInput.trim();
-    if (!text || chatBusy || chatDone || !sessionRef.current) return;
-    setChatMessages((prev) => [...prev, { speaker: 'caller', text }]);
-    setChatInput('');
-    setChatBusy(true);
-    setChatError(null);
-    try {
-      const res = await playgroundApi.sendTurn(sessionRef.current.call_id, { text });
-      applyTurnResponse(res);
-    } catch (err) {
-      setChatError(err.message || 'Could not send that message.');
-    } finally {
-      setChatBusy(false);
-    }
-  }
-
-  async function finishTextSession() {
-    if (!sessionRef.current) return;
-    setCompleting(true);
-    setCompleteError(null);
-    try {
-      const res = await playgroundApi.completeSession(sessionRef.current.call_id);
-      setResult(res || {});
-      setPhase(PHASES.ENDED); // reuse the full voice-mode report view
-    } catch (e) {
-      setCompleteError(e.message || 'Could not finalize the session.');
-    } finally {
-      setCompleting(false);
-    }
-  }
+  // The typed-conversation engine (start / turn loop / complete) now lives in
+  // components/TextPlayground.jsx — reused here and by the agent workspace.
 
   // ------------------------------------------------------------------ render
-
-  const chatLogRef = useRef(null);
-  useEffect(() => {
-    const el = chatLogRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chatMessages, chatBusy]);
 
   function renderFieldsTable(fields) {
     return (
@@ -553,7 +450,7 @@ export default function PlaygroundPage() {
         </div>
 
         <div className="card chat-panel">
-          <div className="form-actions space-between">
+          <div className="form-actions space-between" style={{ marginBottom: 12 }}>
             <span className="meta-line">
               {versionInfo && (
                 <>
@@ -566,79 +463,19 @@ export default function PlaygroundPage() {
                 </>
               )}
             </span>
-            <div>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => {
-                  userEndedRef.current = true;
-                  finishTextSession();
-                }}
-                disabled={completing}
-              >
-                {completing ? 'Finishing…' : 'End session & show report'}
-              </button>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={backToSetup}>
-                Back to setup
-              </button>
-            </div>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={backToSetup}>
+              Back to setup
+            </button>
           </div>
 
-          <div className="chat-log" ref={chatLogRef}>
-            {chatMessages.length === 0 && !chatBusy && (
-              <p className="hint">Starting the conversation…</p>
-            )}
-            {chatMessages.map((m, i) => (
-              <div key={i} className={`chat-row ${m.speaker === 'caller' ? 'caller' : 'agent'}`}>
-                <div className={`chat-bubble ${m.speaker === 'caller' ? 'bubble-caller' : 'bubble-agent'}`}>
-                  {m.text}
-                </div>
-              </div>
-            ))}
-            {chatBusy && (
-              <div className="chat-row agent">
-                <div className="chat-bubble bubble-agent hint">Typing…</div>
-              </div>
-            )}
-          </div>
-
-          {chatError && <div className="banner banner-error">{chatError}</div>}
-
-          {chatDone && (
-            <div className="banner banner-success">
-              <strong>Conversation complete.</strong> The agent ended this session.
-            </div>
-          )}
-
-          {liveFields.length > 0 && (
-            <div>
-              <h3 className="card-title">Extracted so far</h3>
-              {renderFieldsTable(liveFields)}
-            </div>
-          )}
-
-          {!chatDone ? (
-            <form className="chat-input-row" onSubmit={sendText}>
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Type your reply…"
-                disabled={chatBusy}
-                autoFocus
-                aria-label="Your message"
-              />
-              <button type="submit" className="btn btn-primary" disabled={chatBusy || !chatInput.trim()}>
-                Send
-              </button>
-            </form>
-          ) : (
-            <div className="form-actions">
-              <button type="button" className="btn btn-primary" onClick={finishTextSession} disabled={completing}>
-                {completing ? 'Collecting results…' : 'View full report'}
-              </button>
-            </div>
-          )}
+          <TextPlayground
+            key={selectedVersionId}
+            versionId={selectedVersionId}
+            onFinishReport={(res) => {
+              setResult(res || {});
+              setPhase(PHASES.ENDED); // reuse the full voice-mode report view
+            }}
+          />
         </div>
       </div>
     );
@@ -947,7 +784,16 @@ export default function PlaygroundPage() {
               </p>
               {connectError && <div className="banner banner-error">{connectError}</div>}
               <div className="form-actions">
-                <button type="button" className="btn btn-primary btn-lg" onClick={startTextCall}>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-lg"
+                  onClick={() => {
+                    setResult(null);
+                    setFatalError(null);
+                    setConnectError(null);
+                    setPhase(PHASES.TEXT);
+                  }}
+                >
                   Start text test call
                 </button>
               </div>

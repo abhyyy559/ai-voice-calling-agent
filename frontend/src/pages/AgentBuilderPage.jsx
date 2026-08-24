@@ -7,6 +7,7 @@ import ExtractionSchemaEditor, {
   serializeExtractionSchema,
 } from '../components/ExtractionSchemaEditor.jsx';
 import VoiceSettingsForm, { normalizeVoiceSettings } from '../components/VoiceSettingsForm.jsx';
+import ContextFieldsEditor from '../components/ContextFieldsEditor.jsx';
 
 const STEPS = [
   { key: 'basics', title: 'Basics' },
@@ -18,6 +19,128 @@ const STEPS = [
 ];
 
 // Which wizard step owns each API payload segment (for inline 422 errors).
+/**
+ * Serialize a draft config into an AgentVersion API payload.
+ * Pure so the agent workspace (/agents/:id) can reuse it verbatim.
+ */
+export function buildVersionPayload(cfg) {
+  const c = cfg;
+  const hints = c.questionFlow.map((s) => String(s.expectedField || '').trim());
+  const companyContext = {};
+  c.contextRows.forEach((r) => {
+    const key = String(r.key || '').trim();
+    if (key) companyContext[key] = r.value;
+  });
+  if (hints.some(Boolean)) {
+    // Field hints survive round-trips here (the flow itself only persists
+    // step/question); the runtime also benefits from seeing them in prompt.
+    companyContext.question_field_hints = hints;
+  }
+  return {
+    system_prompt: c.systemPrompt.trim(),
+    company_context: companyContext,
+    question_flow: c.questionFlow.map((s, i) => ({
+      step: i + 1,
+      question: String(s.question || '').trim(),
+    })),
+    extraction_schema: serializeExtractionSchema(c.extractionRows),
+    disclosure_script: c.disclosureScript.trim(),
+    escalation_rules: c.escalationRules.map((r) => {
+      const trigger = String(r.trigger || '').trim();
+      return r.action ? { trigger, action: r.action } : trigger;
+    }),
+    voice_settings: normalizeVoiceSettings(c.voice),
+  };
+}
+
+/** Convert an AgentVersionOut into the editable draft shape. */
+export function hydrateFromVersion(v) {
+  const ctx = v.company_context && typeof v.company_context === 'object' ? { ...v.company_context } : {};
+  const hints = Array.isArray(ctx.question_field_hints) ? ctx.question_field_hints : [];
+  delete ctx.question_field_hints;
+  const contextRows = Object.entries(ctx).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }));
+
+  const questionFlow = (Array.isArray(v.question_flow) ? v.question_flow : []).map((s, i) => ({
+    question: (s && s.question) || '',
+    expectedField: hints[i] || '',
+  }));
+
+  const escalationRules = (Array.isArray(v.escalation_rules) ? v.escalation_rules : []).map((r) =>
+    typeof r === 'string'
+      ? { trigger: r, action: '' }
+      : { trigger: (r && r.trigger) || '', action: (r && r.action) || '' }
+  );
+
+  return {
+    systemPrompt: v.system_prompt || '',
+    contextRows,
+    disclosureScript: v.disclosure_script || '',
+    escalationRules,
+    questionFlow: questionFlow.length ? questionFlow : [{ question: '', expectedField: '' }],
+    extractionRows: deserializeExtractionSchema(v.extraction_schema),
+    voice: {
+      tts_voice_id: '',
+      speaking_rate: 1.0,
+      stt_language: 'en',
+      llm_model: '',
+      ...(v.voice_settings || {}),
+    },
+  };
+}
+
+/**
+ * Client-side mirror of the backend's validation rules (fail fast, cheap).
+ * Pure; shared with the agent workspace save-as-new-version flow.
+ */
+export function validateVersionPayload(payload, config) {
+  const errs = {};
+  if (!payload.system_prompt || payload.system_prompt.length < 10) {
+    errs['system_prompt'] = 'System prompt must be at least 10 characters.';
+  }
+  if (!payload.disclosure_script || payload.disclosure_script.length < 10) {
+    errs['disclosure_script'] = 'Disclosure script must be at least 10 characters.';
+  }
+  if (!payload.escalation_rules.length) {
+    errs['escalation_rules'] = 'Add at least one escalation rule.';
+  } else if (
+    payload.escalation_rules.some((r) => (typeof r === 'string' ? !r.trim() : !String(r.trigger || '').trim()))
+  ) {
+    errs['escalation_rules'] = 'Every escalation rule needs its trigger text filled in.';
+  }
+  if (!payload.question_flow.length) {
+    errs['question_flow'] = 'Add at least one question.';
+  } else {
+    const bad = payload.question_flow.findIndex((s) => !s.question);
+    if (bad !== -1) errs[`question_flow.${bad}.question`] = 'This question is empty.';
+  }
+  const names = Object.keys(payload.extraction_schema);
+  if (!names.length) {
+    errs['extraction_schema'] = 'Add at least one extraction field.';
+  } else {
+    for (const [i, row] of ((config && config.extractionRows) || []).entries()) {
+      const name = String(row.name || '').trim();
+      if (!name) {
+        errs[`extraction_schema.row${i}`] = `Field ${i + 1}: name is required.`;
+      } else if (!String(row.description || '').trim()) {
+        errs[`extraction_schema.row${i}`] = `Field “${name}”: describe what to listen for.`;
+      }
+    }
+    if (new Set(names).size !== names.length) {
+      errs['extraction_schema.duplicate'] = 'Two fields share the same name.';
+    }
+    for (const [name, f] of Object.entries(payload.extraction_schema)) {
+      const t = f.confidence_threshold;
+      if (typeof t !== 'number' || Number.isNaN(t) || t < 0 || t > 1) {
+        errs[`extraction_schema.threshold`] = `Field “${name}”: confidence must be between 0 and 1.`;
+      }
+    }
+  }
+  return errs;
+}
+
 const SEGMENT_STEP = {
   system_prompt: 1,
   company_context: 1,
@@ -34,14 +157,8 @@ const DEFAULT_SYSTEM_PROMPT =
 const DEFAULT_DISCLOSURE =
   'This is an automated assistant call. Please note that this call may be recorded for quality and compliance purposes.';
 
-const ESCALATION_ACTIONS = [
-  { value: '', label: 'Plain rule (text only)' },
-  { value: 'transfer', label: 'Transfer to human' },
-  { value: 'flag', label: 'Flag for review' },
-  { value: 'end_call', label: 'End the call' },
-];
-
-function emptyConfig() {
+/** Blank editable draft (exported for the agent workspace). */
+export function emptyConfig() {
   return {
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     contextRows: [],
@@ -171,84 +288,8 @@ export default function AgentBuilderPage() {
   }
 
   // ---- serialization ------------------------------------------------------
-
-  function buildVersionPayload(cfg) {
-    const c = cfg || config;
-    const hints = c.questionFlow.map((s) => String(s.expectedField || '').trim());
-    const companyContext = {};
-    c.contextRows.forEach((r) => {
-      const key = String(r.key || '').trim();
-      if (key) companyContext[key] = r.value;
-    });
-    if (hints.some(Boolean)) {
-      // Field hints survive round-trips here (the flow itself only persists
-      // step/question); the runtime also benefits from seeing them in prompt.
-      companyContext.question_field_hints = hints;
-    }
-    return {
-      system_prompt: c.systemPrompt.trim(),
-      company_context: companyContext,
-      question_flow: c.questionFlow.map((s, i) => ({
-        step: i + 1,
-        question: String(s.question || '').trim(),
-      })),
-      extraction_schema: serializeExtractionSchema(c.extractionRows),
-      disclosure_script: c.disclosureScript.trim(),
-      escalation_rules: c.escalationRules.map((r) => {
-        const trigger = String(r.trigger || '').trim();
-        return r.action ? { trigger, action: r.action } : trigger;
-      }),
-      voice_settings: normalizeVoiceSettings(c.voice),
-    };
-  }
-
-  /** Client-side mirror of the backend's validation rules (fail fast, cheap). */
-  function validateLocally(payload) {
-    const errs = {};
-    if (!meta.name.trim()) errs['meta.name'] = 'Agent name is required.';
-    if (!payload.system_prompt || payload.system_prompt.length < 10) {
-      errs['system_prompt'] = 'System prompt must be at least 10 characters.';
-    }
-    if (!payload.disclosure_script || payload.disclosure_script.length < 10) {
-      errs['disclosure_script'] = 'Disclosure script must be at least 10 characters.';
-    }
-    if (!payload.escalation_rules.length) {
-      errs['escalation_rules'] = 'Add at least one escalation rule.';
-    } else if (
-      payload.escalation_rules.some((r) => (typeof r === 'string' ? !r.trim() : !String(r.trigger || '').trim()))
-    ) {
-      errs['escalation_rules'] = 'Every escalation rule needs its trigger text filled in.';
-    }
-    if (!payload.question_flow.length) {
-      errs['question_flow'] = 'Add at least one question.';
-    } else {
-      const bad = payload.question_flow.findIndex((s) => !s.question);
-      if (bad !== -1) errs[`question_flow.${bad}.question`] = 'This question is empty.';
-    }
-    const names = Object.keys(payload.extraction_schema);
-    if (!names.length) {
-      errs['extraction_schema'] = 'Add at least one extraction field.';
-    } else {
-      for (const [i, row] of (config.extractionRows || []).entries()) {
-        const name = String(row.name || '').trim();
-        if (!name) {
-          errs[`extraction_schema.row${i}`] = `Field ${i + 1}: name is required.`;
-        } else if (!String(row.description || '').trim()) {
-          errs[`extraction_schema.row${i}`] = `Field “${name}”: describe what to listen for.`;
-        }
-      }
-      if (new Set(names).size !== names.length) {
-        errs['extraction_schema.duplicate'] = 'Two fields share the same name.';
-      }
-      for (const [name, f] of Object.entries(payload.extraction_schema)) {
-        const t = f.confidence_threshold;
-        if (typeof t !== 'number' || Number.isNaN(t) || t < 0 || t > 1) {
-          errs[`extraction_schema.threshold`] = `Field “${name}”: confidence must be between 0 and 1.`;
-        }
-      }
-    }
-    return errs;
-  }
+  // buildVersionPayload / validateVersionPayload / hydrateFromVersion live at
+  // module scope (exported) so the agent workspace can reuse them verbatim.
 
   async function ensureAgent() {
     if (agent && agent.id) {
@@ -333,8 +374,9 @@ export default function AgentBuilderPage() {
     setGeneralErrors([]);
     setFieldErrors({});
     try {
-      const payload = buildVersionPayload();
-      const localErrors = validateLocally(payload);
+      const payload = buildVersionPayload(config);
+      const localErrors = validateVersionPayload(payload, config);
+      if (!meta.name.trim()) localErrors['meta.name'] = 'Agent name is required.';
       const keys = Object.keys(localErrors);
       if (keys.length) {
         setFieldErrors({ ...localErrors });
@@ -525,150 +567,16 @@ export default function AgentBuilderPage() {
               Everything the agent should know before it speaks: who it represents, plus the mandatory caller
               disclosure and when to hand over to a human. Plain facts work best — one short line per entry.
             </p>
-
-            <div className="field">
-              <label>Facts about your organization</label>
-              {!config.contextRows.length && (
-                <p className="hint">No facts yet — add things like institute name, course details, office hours.</p>
-              )}
-              {(config.contextRows || []).map((row, i) => (
-                <div className="context-row" key={i}>
-                  <input
-                    type="text"
-                    aria-label={`Fact ${i + 1} label`}
-                    placeholder="Label, e.g. institute_name"
-                    value={row.key}
-                    onChange={(e) =>
-                      patchConfig({
-                        contextRows: config.contextRows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
-                      })
-                    }
-                  />
-                  <input
-                    type="text"
-                    aria-label={`Fact ${i + 1} value`}
-                    placeholder="Value, e.g. Sunrise Degree College"
-                    value={row.value}
-                    onChange={(e) =>
-                      patchConfig({
-                        contextRows: config.contextRows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
-                      })
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="icon-btn qfe-remove"
-                    aria-label={`Remove fact ${i + 1}`}
-                    onClick={() => patchConfig({ contextRows: config.contextRows.filter((_, j) => j !== i) })}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => patchConfig({ contextRows: [...(config.contextRows || []), { key: '', value: '' }] })}
-              >
-                + Add fact
-              </button>
-              {err('company_context') && <p className="hint hint-error">{err('company_context')}</p>}
-            </div>
-
-            <div className="field">
-              <label htmlFor="ab-prompt">
-                System prompt <span className="req-star">*</span>
-              </label>
-              <textarea
-                id="ab-prompt"
-                rows="5"
-                value={config.systemPrompt}
-                onChange={(e) => patchConfig({ systemPrompt: e.target.value })}
-              />
-              <p className="hint">
-                High-level instructions for how the agent behaves (persona, tone, hard rules). The question flow below
-                is injected automatically — you do not need to repeat it here.
-              </p>
-              {err('system_prompt') && <p className="hint hint-error">{err('system_prompt')}</p>}
-            </div>
-
-            <div className="field">
-              <label htmlFor="ab-disclosure">
-                Mandatory AI disclosure <span className="req-star">*</span>
-              </label>
-              <textarea
-                id="ab-disclosure"
-                rows="2"
-                value={config.disclosureScript}
-                onChange={(e) => patchConfig({ disclosureScript: e.target.value })}
-              />
-              <p className="hint">
-                Spoken verbatim as the very first thing on every call, so the listener knows they are talking to an AI
-                (regulatory requirement).
-              </p>
-              {err('disclosure_script') && <p className="hint hint-error">{err('disclosure_script')}</p>}
-            </div>
-
-            <div className="field">
-              <label>
-                Escalation rules <span className="req-star">*</span>
-              </label>
-              {(config.escalationRules || []).map((rule, i) => (
-                <div className="escalation-row" key={i}>
-                  <input
-                    type="text"
-                    aria-label={`Escalation rule ${i + 1} trigger`}
-                    placeholder="Trigger, e.g. The caller becomes distressed"
-                    value={rule.trigger}
-                    onChange={(e) =>
-                      patchConfig({
-                        escalationRules: config.escalationRules.map((r, j) =>
-                          j === i ? { ...r, trigger: e.target.value } : r
-                        ),
-                      })
-                    }
-                  />
-                  <select
-                    aria-label={`Escalation rule ${i + 1} action`}
-                    value={rule.action || ''}
-                    onChange={(e) =>
-                      patchConfig({
-                        escalationRules: config.escalationRules.map((r, j) =>
-                          j === i ? { ...r, action: e.target.value } : r
-                        ),
-                      })
-                    }
-                  >
-                    {ESCALATION_ACTIONS.map((a) => (
-                      <option key={a.value} value={a.value}>
-                        {a.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="icon-btn qfe-remove"
-                    aria-label={`Remove escalation rule ${i + 1}`}
-                    onClick={() =>
-                      patchConfig({ escalationRules: config.escalationRules.filter((_, j) => j !== i) })
-                    }
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() =>
-                  patchConfig({ escalationRules: [...(config.escalationRules || []), { trigger: '', action: 'flag' }] })
-                }
-              >
-                + Add rule
-              </button>
-              <p className="hint">When a trigger matches, the agent stops and follows the action instead of improvising.</p>
-              {err('escalation_rules') && <p className="hint hint-error">{err('escalation_rules')}</p>}
-            </div>
+            <ContextFieldsEditor
+              value={config}
+              onChange={patchConfig}
+              errors={{
+                company_context: err('company_context'),
+                system_prompt: err('system_prompt'),
+                disclosure_script: err('disclosure_script'),
+                escalation_rules: err('escalation_rules'),
+              }}
+            />
           </div>
         )}
 
@@ -840,40 +748,3 @@ export default function AgentBuilderPage() {
   );
 }
 
-/** Convert an AgentVersionOut into the editable draft shape. */
-function hydrateFromVersion(v) {
-  const ctx = v.company_context && typeof v.company_context === 'object' ? { ...v.company_context } : {};
-  const hints = Array.isArray(ctx.question_field_hints) ? ctx.question_field_hints : [];
-  delete ctx.question_field_hints;
-  const contextRows = Object.entries(ctx).map(([key, value]) => ({
-    key,
-    value: typeof value === 'string' ? value : JSON.stringify(value),
-  }));
-
-  const questionFlow = (Array.isArray(v.question_flow) ? v.question_flow : []).map((s, i) => ({
-    question: (s && s.question) || '',
-    expectedField: hints[i] || '',
-  }));
-
-  const escalationRules = (Array.isArray(v.escalation_rules) ? v.escalation_rules : []).map((r) =>
-    typeof r === 'string'
-      ? { trigger: r, action: '' }
-      : { trigger: (r && r.trigger) || '', action: (r && r.action) || '' }
-  );
-
-  return {
-    systemPrompt: v.system_prompt || '',
-    contextRows,
-    disclosureScript: v.disclosure_script || '',
-    escalationRules,
-    questionFlow: questionFlow.length ? questionFlow : [{ question: '', expectedField: '' }],
-    extractionRows: deserializeExtractionSchema(v.extraction_schema),
-    voice: {
-      tts_voice_id: '',
-      speaking_rate: 1.0,
-      stt_language: 'en',
-      llm_model: '',
-      ...(v.voice_settings || {}),
-    },
-  };
-}

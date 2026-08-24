@@ -6,6 +6,7 @@ import Login from './pages/Login.jsx';
 import LandingPage from './pages/LandingPage.jsx';
 import OverviewPage from './pages/OverviewPage.jsx';
 import AgentsPage from './pages/AgentsPage.jsx';
+import AgentDetailPage from './pages/AgentDetailPage.jsx';
 import AgentBuilderPage from './pages/AgentBuilderPage.jsx';
 import CampaignsPage from './pages/CampaignsPage.jsx';
 import CampaignDetailPage from './pages/CampaignDetailPage.jsx';
@@ -56,6 +57,10 @@ export default function App() {
           <Route element={<AuthShell />}>
             <Route index element={<OverviewPage />} />
             <Route path="agents" element={<AgentsPage />} />
+            {/* Agent workspace: tabbed config editor + sticky test rail.
+                Declared before agents/new & :id/edit — React Router ranks
+                routes, but explicit ordering keeps the intent obvious. */}
+            <Route path="agents/:id" element={<AgentDetailPage />} />
             {/* No key prop: navigating /agents/new -> /agents/:id/edit after
                 creation must preserve the wizard's in-memory state. */}
             <Route path="agents/new" element={<AgentBuilderPage />} />

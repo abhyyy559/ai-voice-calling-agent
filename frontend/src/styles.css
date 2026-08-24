@@ -1847,6 +1847,10 @@ audio {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* The rail embeds a full chat panel — keep it scrollable inside the
+     sticky viewport instead of pushing the page taller than the editor. */
+  max-height: calc(100vh - 92px);
+  overflow-y: auto;
   min-width: 0;
 }
 
@@ -3116,4 +3120,16 @@ th.preview-head-phone {
 .form-actions.space-between {
   justify-content: space-between;
   align-items: center;
+}
+
+/* ---------- Reusable text playground (Playground + agent workspace) -------- */
+
+.text-playground {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tp-toolbar {
+  margin-bottom: 0;
 }
