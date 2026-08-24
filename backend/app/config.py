@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     cartesia_api_key: str = ""
     groq_api_key: str = ""
     openai_api_key: str = ""
+    # Groq chat model for playground TEXT mode (must match GROQ_MODEL used by
+    # the voice worker so both modes exercise the same brain).
+    groq_model: str = "qwen/qwen3.6-27b"
 
     @property
     def test_phone_number_list(self) -> list[str]:

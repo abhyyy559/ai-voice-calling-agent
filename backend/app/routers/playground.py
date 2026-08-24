@@ -3,15 +3,23 @@
 Browser mic joins a LiveKit room via a short-lived token issued here; the same
 voice-agent worker that handles phone calls accepts the room job. Sessions are
 recorded as ``calls(kind='playground')`` — zero telephony minutes burned.
+
+Text mode: POST /sessions/{call_id}/turns drives the same conversational flow
+(disclosure → question flow → extraction → end_call) with typed messages —
+the backend talks to Groq directly, no LiveKit/telephony involved. The system
+prompt below is a slim server-side twin of voice-agent/app/prompting.py; the
+two services are deliberately decoupled.
 """
 from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -30,9 +38,21 @@ router = APIRouter(prefix="/api/playground", tags=["playground"])
 _TOKEN_TTL = timedelta(hours=1)
 _LATENCY_METRICS = ("stt_final_ms", "llm_first_token_ms", "tts_first_audio_ms", "e2e_ms")
 
+_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# Tool-call rounds per user turn before we force a plain-text reply.
+_MAX_TOOL_ROUNDS = 3
+
 
 class SessionCreate(BaseModel):
     agent_version_id: int = Field(gt=0)
+
+
+class TurnCreate(BaseModel):
+    """One text-mode exchange. ``event='start'`` asks the agent for its
+    opening utterance (disclosure + greeting + first question)."""
+
+    text: str = Field(default="", max_length=2000)
+    event: Optional[str] = None
 
 
 def _issue_room_token(settings: Settings, room_name: str, identity: str, metadata: dict[str, Any]) -> str:
@@ -232,4 +252,407 @@ def complete_session(
             for f in fields
         ],
         "latency": _latency_summary(list(turns)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Text mode — same conversation flow, typed instead of spoken
+# ---------------------------------------------------------------------------
+
+
+def _question_text(item: Any) -> str:
+    """Question text from either a plain string or a flow-step object."""
+    if isinstance(item, dict):
+        return str(item.get("question") or item.get("text") or "").strip()
+    return str(item or "").strip()
+
+
+def _render_text_system_prompt(config: Any) -> str:
+    """Slim server-side twin of voice-agent/app/prompting.render_system_prompt.
+
+    Same section order and discipline (disclosure verbatim first, TTS-safe
+    style rules so text replies behave like the spoken ones), but compact
+    enough to keep text-mode token cost low.
+    """
+    sections: list[str] = []
+
+    # 1. Mandatory disclosure FIRST and verbatim.
+    disclosure = str(config.disclosure_script or "").strip()
+    if disclosure:
+        sections.append(
+            f"MANDATORY DISCLOSURE - your VERY FIRST utterance, word-for-word:\n{disclosure}"
+        )
+
+    # 2. Persona / mission.
+    role_lines = [
+        "You are a friendly human-sounding outbound phone agent; this is a TEXT test of that call.",
+        "Every reply you type is read aloud by a speech engine exactly as written.",
+        "Have a short natural conversation and complete the goals below.",
+    ]
+    persona = str(config.system_prompt or "").strip()
+    if persona:
+        role_lines.append(f"Agent-specific role from the creator: {persona}")
+    sections.append(
+        "WHO YOU ARE:\n" + "\n".join(f"- {line}" for line in role_lines)
+    )
+
+    # 3. Company context.
+    company_context = config.company_context or {}
+    if company_context:
+        sections.append(
+            "COMPANY KNOWLEDGE - facts you may use; never invent anything beyond this:\n"
+            + json.dumps(company_context, ensure_ascii=False, default=str)
+        )
+
+    # 4. TTS-safe speaking style (kept identical in spirit to the voice agent).
+    sections.append(
+        "HOW TO REPLY (critical):\n"
+        "- Keep every reply SHORT: usually 1-2 sentences, never more than 3.\n"
+        "- Plain conversational words only. This text is converted to speech:\n"
+        "  NO markdown, NO asterisks, NO lists, NO numbering symbols, NO emoji,\n"
+        "  NO newlines inside a reply. Sentences and punctuation only.\n"
+        "- Respond to what the person ACTUALLY said before moving on; ask ONE thing per turn.\n"
+        "- Never repeat a question they already answered. Stay polite even if they are upset."
+    )
+
+    # 5. Question flow as goals to weave in naturally.
+    goals: list[str] = []
+    number = 0
+    for item in config.question_flow or []:
+        text_value = _question_text(item)
+        if not text_value:
+            continue
+        number += 1
+        goals.append(f"{number}. {text_value}")
+    if not goals:
+        goals.append("No fixed goals were configured; have a natural conversation about why you are calling.")
+    sections.append(
+        "YOUR GOALS - information to collect during the call:\n"
+        + "\n".join(goals)
+        + "\nCover ALL of these by the end, weaving each into the conversation naturally."
+    )
+
+    # 6. Extraction discipline with the exact field list.
+    extraction_lines = [
+        "RECORDING ANSWERS - extraction discipline:",
+        "- The moment the caller states something that answers a goal above, IMMEDIATELY call "
+        "`record_extracted_field(field_name, value, confidence)` in that same turn.",
+        "- Use the EXACT field names below. Quote values exactly as the caller said them.",
+        "- Give an honest confidence 0.0-1.0. NEVER fabricate or guess a value - "
+        "if unsure, ask a short clarifying question instead of recording.",
+        "- When everything is captured (or the caller wants to stop), call `end_call(summary)` "
+        "with a factual summary including any unfilled required fields.",
+        "Fields to capture:",
+    ]
+    schema = config.extraction_schema or {}
+    if isinstance(schema, dict):
+        for field_name, spec in schema.items():
+            if isinstance(spec, dict):
+                description = str(spec.get("description") or spec.get("type") or "").strip()
+                required_marker = (
+                    " [REQUIRED]" if str(spec.get("validation") or "").lower() == "required" else ""
+                )
+                extraction_lines.append(f"- `{field_name}`{required_marker}: {description}".rstrip(": "))
+            else:
+                extraction_lines.append(f"- `{field_name}`: {spec}")
+    sections.append("\n".join(extraction_lines))
+
+    return "\n\n".join(sections)
+
+
+# OpenAI-compatible function tools (Groq chat completions accepts this schema).
+_TEXT_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "record_extracted_field",
+            "description": (
+                "Record a structured value the caller stated. Use the exact field name from "
+                "the extraction schema. Never guess: if unsure, ask a clarifying question instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "field_name": {
+                        "type": "string",
+                        "description": "Exact field name from the extraction schema.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The value exactly as the caller stated it.",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Your honest confidence in the value (0.0 to 1.0).",
+                    },
+                },
+                "required": ["field_name", "value", "confidence"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "end_call",
+            "description": (
+                "Politely finish the conversation. Call when all questions are handled, the "
+                "caller wants to stop, or escalation rules say to wrap up."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Factual wrap-up summary of captured and unfilled fields.",
+                    },
+                },
+                "required": ["summary"],
+            },
+        },
+    },
+]
+
+
+def _groq_request_body(settings: Settings, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Chat-completions payload mirroring the voice worker's LLM settings."""
+    body: dict[str, Any] = {
+        "model": settings.groq_model,
+        "messages": messages,
+        "tools": _TEXT_TOOLS,
+        "tool_choice": "auto",
+        "temperature": 0.6,
+        "max_tokens": 300,
+    }
+    if "qwen" in settings.groq_model.lower():
+        # Qwen is a hybrid reasoning model - thinking tokens add latency.
+        body["reasoning_effort"] = "none"
+    return body
+
+
+async def _groq_chat(
+    settings: Settings, messages: list[dict[str, Any]], include_tools: bool = True
+) -> dict[str, Any]:
+    """One direct Groq chat-completions round trip; returns the assistant message."""
+    body = _groq_request_body(settings, messages)
+    if not include_tools:
+        body.pop("tools", None)
+        body.pop("tool_choice", None)
+    headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
+    async with httpx.AsyncClient(base_url=_GROQ_BASE_URL, timeout=45.0) as client:
+        response = await client.post("/chat/completions", json=body, headers=headers)
+    if response.status_code != 200:
+        logger.error("Groq chat failed (%s): %s", response.status_code, response.text[:500])
+        raise HTTPException(status_code=502, detail="The language model did not respond. Try again shortly.")
+    try:
+        return response.json()["choices"][0]["message"]
+    except (KeyError, IndexError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Unexpected response from the language model.") from exc
+
+
+def _execute_text_tool(
+    db: Session, call: Call, name: str, arguments: dict[str, Any], source_turn_index: int
+) -> tuple[str, Optional[dict[str, Any]], bool]:
+    """Run one tool call against the DB.
+
+    Returns ``(tool_result_text, extracted_field_or_None, done_flag)``.
+    Field upsert semantics mirror the internal API (_apply_fields).
+    """
+    if name == "record_extracted_field":
+        field_name = str(arguments.get("field_name") or "").strip()
+        value = arguments.get("value")
+        confidence = arguments.get("confidence")
+        if not field_name:
+            return "error: field_name is required", None, False
+        try:
+            conf = float(confidence)  # type: ignore[arg-type]
+            if not 0.0 <= conf <= 1.0:
+                conf = None
+        except (TypeError, ValueError):
+            conf = None
+        for existing in db.scalars(
+            select(ExtractedField).where(
+                ExtractedField.call_id == call.id,
+                ExtractedField.field_name == field_name,
+            )
+        ):
+            db.delete(existing)
+        db.add(
+            ExtractedField(
+                call_id=call.id,
+                field_name=field_name,
+                field_value=None if value is None else str(value),
+                confidence=conf,
+                source_turn_index=source_turn_index,
+            )
+        )
+        recorded = {
+            "field_name": field_name,
+            "field_value": None if value is None else str(value),
+            "confidence": conf,
+        }
+        return f"recorded {field_name}", recorded, False
+
+    if name == "end_call":
+        summary = str(arguments.get("summary") or "").strip() or None
+        now = utcnow()
+        call.summary = summary
+        call.status = "completed"
+        call.ended_at = now
+        if call.started_at is not None:
+            call.duration_seconds = (now - call.started_at).total_seconds()
+        return "call ended", {"summary": summary}, True
+
+    return f"error: unknown tool {name}", None, False
+
+
+@router.post("/sessions/{call_id}/turns")
+async def create_turn(
+    call_id: int,
+    payload: TurnCreate,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """One TEXT-mode conversational turn (or the opening line via event=start).
+
+    Rebuilds history from persisted Transcript rows, calls Groq directly,
+    executes any function tools, persists both sides of the exchange, and
+    returns the agent reply plus extraction state.
+    """
+    settings: Settings = request.app.state.settings
+    if not settings.groq_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Text mode needs GROQ_API_KEY configured on the backend.",
+        )
+
+    call = _get_own_playground_call(db, call_id, user)  # 404 unless own playground row
+    if call.status != "in_progress":
+        raise HTTPException(status_code=409, detail="This session has already ended.")
+    version = db.get(AgentVersion, call.agent_version_id) if call.agent_version_id else None
+    if version is None:
+        raise HTTPException(status_code=409, detail="Session has no agent version configured.")
+
+    start_event = payload.event == "start"
+    user_text = "" if start_event else payload.text.strip()
+    if not start_event and not user_text:
+        raise HTTPException(status_code=422, detail="'text' must not be empty.")
+
+    system_prompt = _render_text_system_prompt(version)
+    history_rows = list(
+        db.scalars(
+            select(Transcript)
+            .where(Transcript.call_id == call.id)
+            .order_by(Transcript.turn_index, Transcript.id)
+        ).all()
+    )
+    next_index = (history_rows[-1].turn_index + 1) if history_rows else 0
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for row in history_rows:
+        messages.append(
+            {"role": "assistant" if row.speaker == "agent" else "user", "content": row.text}
+        )
+    if start_event:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Produce ONLY your opening utterance now: the mandatory disclosure "
+                    "followed by a warm one-line greeting and your first question. "
+                    "There is no user message yet."
+                ),
+            }
+        )
+    else:
+        messages.append({"role": "user", "content": user_text})
+
+    extracted_now: list[dict[str, Any]] = []
+    done = False
+    started_mono = time.monotonic()
+    assistant_text = ""
+
+    for round_no in range(_MAX_TOOL_ROUNDS):
+        message = await _groq_chat(settings, messages, include_tools=round_no < _MAX_TOOL_ROUNDS - 1)
+        tool_calls = message.get("tool_calls") or []
+        content = str(message.get("content") or "").strip()
+        if not tool_calls:
+            assistant_text = content
+            break
+        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+                if not isinstance(arguments, dict):
+                    arguments = {}
+            except json.JSONDecodeError:
+                arguments = {}
+            result_text, field_record, done_flag = _execute_text_tool(
+                db, call, str(function.get("name") or ""), arguments, next_index
+            )
+            if field_record and "summary" not in field_record:
+                extracted_now.append(field_record)
+            done = done or done_flag
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(tool_call.get("id") or ""),
+                    "content": result_text,
+                }
+            )
+    else:
+        # Tool loop exhausted without plain text - force one final text reply.
+        message = await _groq_chat(
+            settings,
+            messages + [{"role": "system", "content": "Reply now in plain words only."}],
+            include_tools=False,
+        )
+        assistant_text = str(message.get("content") or "").strip()
+
+    elapsed_ms = round((time.monotonic() - started_mono) * 1000.0)
+
+    # Persist both sides of the exchange (caller turn only when not start).
+    user_index: Optional[int] = None
+    if user_text:
+        user_index = next_index
+        db.add(
+            Transcript(
+                call_id=call.id,
+                turn_index=next_index,
+                speaker="caller",
+                text=user_text,
+                timestamp=utcnow(),
+            )
+        )
+    agent_index = next_index + 1 if user_text else next_index
+    if assistant_text:
+        db.add(
+            Transcript(
+                call_id=call.id,
+                turn_index=agent_index,
+                speaker="agent",
+                text=assistant_text,
+                timestamp=utcnow(),
+                e2e_ms=float(elapsed_ms),  # text-mode wall clock (no STT/TTS legs)
+            )
+        )
+    db.commit()
+
+    logger.info(
+        "text_turn call=%s org=%s turn=%s start=%s done=%s llm_ms=%s fields=%s",
+        call.id,
+        call.org_id,
+        agent_index,
+        start_event,
+        done,
+        elapsed_ms,
+        len(extracted_now),
+    )
+
+    return {
+        "reply_text": assistant_text,
+        "done": done,
+        "extracted_fields": extracted_now,
+        "turn_index": agent_index if assistant_text else next_index,
     }
