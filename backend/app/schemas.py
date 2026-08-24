@@ -171,6 +171,50 @@ class CallDetailOut(CallOut):
     extracted_fields: list[ExtractedFieldOut]
 
 
+class RecentCallOut(BaseModel):
+    id: int
+    status: str
+    kind: str = "phone"
+    duration_seconds: Optional[float] = None
+    started_at: Optional[datetime] = None
+    agent_name: Optional[str] = None
+
+
+class CallsDayOut(BaseModel):
+    date: str  # YYYY-MM-DD (UTC)
+    count: int
+
+
+class AnalyticsSummaryOut(BaseModel):
+    total_calls: int
+    completed_calls: int
+    success_rate_pct: float
+    avg_e2e_ms: Optional[float] = None
+    median_e2e_ms: Optional[float] = None
+    p95_e2e_ms: Optional[float] = None
+    total_extracted_fields: int
+    calls_last_7d: list[CallsDayOut]
+    recent_calls: list[RecentCallOut]
+
+
+# --- call index (cross-campaign history) --------------------------------------
+
+
+class CallListItemOut(BaseModel):
+    id: int
+    status: str
+    kind: str
+    duration_seconds: Optional[float]
+    started_at: Optional[datetime]
+    created_at: Optional[datetime] = None
+    agent_version_id: Optional[int] = None
+    agent_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_phone: Optional[str] = None
+    avg_e2e_ms: Optional[float] = None
+    flagged_for_human: bool
+
+
 # --- test call ----------------------------------------------------------------
 
 

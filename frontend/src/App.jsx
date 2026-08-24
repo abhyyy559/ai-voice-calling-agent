@@ -4,7 +4,7 @@ import { getToken } from './api.js';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
 import LandingPage from './pages/LandingPage.jsx';
-import DashboardPage from './pages/DashboardPage.jsx';
+import OverviewPage from './pages/OverviewPage.jsx';
 import AgentsPage from './pages/AgentsPage.jsx';
 import AgentBuilderPage from './pages/AgentBuilderPage.jsx';
 import CampaignsPage from './pages/CampaignsPage.jsx';
@@ -53,7 +53,7 @@ export default function App() {
           {/* Public marketing page. LandingPage itself bounces signed-in users home. */}
           <Route path="/landing" element={<LandingPage />} />
           <Route element={<AuthShell />}>
-            <Route index element={<DashboardPage />} />
+            <Route index element={<OverviewPage />} />
             <Route path="agents" element={<AgentsPage />} />
             {/* No key prop: navigating /agents/new -> /agents/:id/edit after
                 creation must preserve the wizard's in-memory state. */}
