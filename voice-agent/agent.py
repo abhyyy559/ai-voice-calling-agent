@@ -12,6 +12,7 @@ Run locally:
 from __future__ import annotations
 
 import logging
+import sys
 
 from livekit import agents
 from livekit.agents import JobContext, WorkerOptions, cli
@@ -46,6 +47,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
 def main() -> None:
     """Configure logging and start the LiveKit worker."""
+    # Bare `python agent.py` (docker compose, systemd) defaults to dev mode
+    # instead of printing usage and exiting.
+    if len(sys.argv) < 2:
+        sys.argv = [sys.argv[0], "dev"]
     settings = get_settings()
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),

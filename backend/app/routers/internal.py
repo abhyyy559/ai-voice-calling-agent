@@ -131,8 +131,9 @@ def _validated_turn(item: Any) -> dict[str, Any]:
     text_value = item.get("text")
     if not isinstance(turn_index, int) or isinstance(turn_index, bool):
         raise ValueError("'turn_index' must be an integer")
-    if speaker not in ("agent", "caller"):
-        raise ValueError("'speaker' must be 'agent' or 'caller'")
+    if speaker not in ("agent", "caller", "user"):
+        raise ValueError("'speaker' must be 'agent', 'caller' or 'user'")
+    speaker = "caller" if speaker == "user" else speaker
     if not isinstance(text_value, str):
         raise ValueError("'text' must be a string")
 

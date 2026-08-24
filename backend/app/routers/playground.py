@@ -64,6 +64,46 @@ def _get_own_playground_call(db: Session, call_id: int, user: User) -> Call:
     return call
 
 
+def _set_room_metadata_best_effort(
+    settings: Settings, room_name: str, version_id: int, call_id: int
+) -> None:
+    """Mirror token metadata onto the room so the worker sees it immediately.
+
+    Best-effort: if the LiveKit server is unreachable the participant-token
+    fallback in the voice agent still carries {version_id, call_id}.
+    """
+    import asyncio
+
+    try:
+        from livekit import api as livekit_api
+
+        async def _update() -> None:
+            client = livekit_api.LiveKitAPI(
+                settings.livekit_url,
+                settings.livekit_api_key,
+                settings.livekit_api_secret,
+            )
+            try:
+                await client.room.update_room_metadata(
+                    livekit_api.UpdateRoomMetadataRequest(
+                        room=room_name,
+                        metadata=json.dumps(
+                            {"version_id": version_id, "call_id": call_id}
+                        ),
+                    )
+                )
+            finally:
+                await client.aclose()
+
+        asyncio.run(_update())
+    except Exception:
+        logger.warning(
+            "Could not set room metadata for %s (participant-token fallback applies)",
+            room_name,
+            exc_info=True,
+        )
+
+
 @router.post("/sessions")
 def create_session(
     payload: SessionCreate,
@@ -95,6 +135,7 @@ def create_session(
         identity=f"user-{user.id}",
         metadata={"version_id": version.id, "call_id": call.id},
     )
+    _set_room_metadata_best_effort(settings, room_name, version.id, call.id)
     logger.info(
         "playground session created call_id=%s org=%s agent=%s version=%s room=%s",
         call.id,

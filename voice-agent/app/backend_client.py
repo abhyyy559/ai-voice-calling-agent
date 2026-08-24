@@ -30,7 +30,14 @@ class BackendError(RuntimeError):
 
 
 class BackendClient:
-    """Small httpx wrapper around the backend internal API."""
+    """Small httpx wrapper around the backend internal API.
+
+    Uses a process-wide SHARED AsyncClient: one BackendClient is created per
+    job, but AgentSession.start() returns immediately while the room stays
+    open — per-job clients were being closed while turns still needed posting.
+    """
+
+    _shared_client: Optional[httpx.AsyncClient] = None
 
     def __init__(
         self,
@@ -41,12 +48,14 @@ class BackendClient:
         cache_ttl_seconds: float = 30.0,
         client: Optional[httpx.AsyncClient] = None,
     ) -> None:
-        self._client = client or httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
-            headers={"X-Internal-Token": internal_token},
-        )
-        self._owns_client = client is None
+        if BackendClient._shared_client is None:
+            BackendClient._shared_client = httpx.AsyncClient(
+                timeout=timeout_seconds,
+                headers={"X-Internal-Token": internal_token},
+            )
+        self._client = client or BackendClient._shared_client
+        self._owns_client = client is not None
+        self._base_url = base_url.rstrip("/")
         self._cache_ttl_seconds = cache_ttl_seconds
         self._config_cache: dict[str, tuple[float, Mapping[str, Any]]] = {}
         self._cache_lock = asyncio.Lock()
@@ -63,7 +72,8 @@ class BackendClient:
                 return cached[1]
             try:
                 response = await self._client.get(
-                    "/internal/agent-config", params={"version_id": version_id}
+                    f"{self._base_url}/internal/agent-config",
+                    params={"version_id": version_id},
                 )
                 response.raise_for_status()
             except httpx.HTTPError as exc:
@@ -112,7 +122,7 @@ class BackendClient:
             payload["summary"] = summary
         try:
             response = await self._client.post(
-                f"/internal/calls/{call_id}/complete", json=payload
+                f"{self._base_url}/internal/calls/{call_id}/complete", json=payload
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
@@ -126,7 +136,7 @@ class BackendClient:
         if not items:
             return True
         try:
-            response = await self._client.post(path, json=items)
+            response = await self._client.post(f"{self._base_url}{path}", json=items)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             logger.error("POST %s failed (%d items): %s", path, len(items), exc)

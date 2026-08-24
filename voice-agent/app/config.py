@@ -1,4 +1,4 @@
-"""Environment-driven configuration for the voice agent runtime.
+﻿"""Environment-driven configuration for the voice agent runtime.
 
 All credentials come from the environment (a ``.env`` file is loaded if
 present); nothing is ever hardcoded. ``BACKEND_INTERNAL_URL`` points at the
@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover
     load_dotenv = None  # type: ignore[assignment]
 
 DEFAULT_BACKEND_INTERNAL_URL = "http://localhost:8000"
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 

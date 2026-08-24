@@ -122,8 +122,12 @@ def build_providers(settings: Settings) -> ProviderBundle:
         bundle.problems.append("CARTESIA_API_KEY missing - text-to-speech disabled")
 
     if settings.groq_api_key:
-        bundle.llm = openai.LLM.with_groq(
-            model=settings.groq_model, api_key=settings.groq_api_key
+        # livekit-agents 1.7.0 has no LLM.with_groq classmethod — Groq is an
+        # OpenAI-compatible endpoint, so construct it explicitly.
+        bundle.llm = openai.LLM(
+            model=settings.groq_model,
+            api_key=settings.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
         )
     elif settings.openai_api_key:
         logger.info(
@@ -158,13 +162,35 @@ class TurnTelemetry:
       eou_delay + llm_ttfb + tts_ttfb.
     """
 
-    def __init__(self, session: AgentSession, backend: BackendClient, call_id: str) -> None:
+    def __init__(
+        self,
+        session: AgentSession,
+        backend: BackendClient,
+        call_id: str,
+        room: Any = None,
+    ) -> None:
         self._session = session
         self._backend = backend
         self._call_id = call_id
+        self._room = room
         self._turn_index = 0
         self._flush_lock = asyncio.Lock()
         self._reset()
+
+    def _publish_caption(self, speaker: str, text: str) -> None:
+        """Stream a live caption to the browser over the room data channel."""
+        if self._room is None or not text.strip():
+            return
+        try:
+            payload = json.dumps(
+                {"type": "caption", "speaker": speaker, "text": text}
+            ).encode("utf-8")
+            loop = asyncio.get_event_loop()
+            loop.create_task(
+                self._room.local_participant.publish_data(payload)
+            )
+        except Exception:
+            logger.debug("Caption publish failed", exc_info=True)
 
     def _reset(self) -> None:
         self._user_text = ""
@@ -198,6 +224,7 @@ class TurnTelemetry:
         if not transcript:
             return
         self._user_text = f"{self._user_text} {transcript}".strip()
+        self._publish_caption("user", transcript)
         if self._end_of_speech_at is not None:
             elapsed_ms = (time.monotonic() - self._end_of_speech_at) * 1000.0
             # Keep the first measurement for this exchange; EOU metric refines it.
@@ -212,9 +239,29 @@ class TurnTelemetry:
         text = str(getattr(item, "text_content", "") or "").strip()
         if role == "assistant" and text:
             self._agent_text = f"{self._agent_text} {text}".strip()
+            self._publish_caption("agent", text)
+            self._schedule_flush()
+
+    def _schedule_flush(self, delay_s: float = 2.5) -> None:
+        """Debounced safety flush so turns persist even if the caller hangs
+        up before the agent_stopped_speaking event fires."""
+        try:
+            loop = asyncio.get_event_loop()
+            loop.call_later(
+                delay_s,
+                lambda: loop.create_task(self._safe_flush()),
+            )
+        except Exception:
+            logger.debug("Flush scheduling failed", exc_info=True)
+
+    async def _safe_flush(self) -> None:
+        try:
+            await self.flush_pending()
+        except Exception:
+            logger.exception("Scheduled flush failed")
 
     def _on_agent_stopped_speaking(self, *_args: Any) -> None:
-        asyncio.ensure_future(self.flush_pending())
+        asyncio.ensure_future(self._safe_flush())
 
     # -- metrics handlers ---------------------------------------------------
 
@@ -369,6 +416,40 @@ def _room_metadata(ctx: JobContext) -> Any:
     return getattr(ctx.room, "metadata", None)
 
 
+def _job_metadata(ctx: JobContext) -> Any:
+    """Job identity metadata: room metadata first, then any remote participant.
+
+    The backend embeds ``{"version_id": ..., "call_id": ...}`` in the joining
+    user's JWT *and* (best-effort) on the room itself. Token metadata lands on
+    the participant, so fall back to scanning remote participants.
+    """
+    raw = _room_metadata(ctx)
+    if raw:
+        return raw
+    participants = list(getattr(ctx.room, "remote_participants", {}).values())
+    for participant in participants:
+        meta = getattr(participant, "metadata", None)
+        if meta:
+            return meta
+    return None
+
+
+async def _wait_for_job_metadata(
+    ctx: JobContext, timeout_s: float = 8.0, interval_s: float = 1.0
+) -> Any:
+    """Poll both room and participant metadata until it shows up or times out."""
+    import asyncio
+
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while True:
+        raw = _job_metadata(ctx)
+        if raw:
+            return raw
+        if asyncio.get_event_loop().time() >= deadline:
+            return None
+        await asyncio.sleep(interval_s)
+
+
 async def _is_connected(ctx: JobContext) -> bool:
     state = getattr(ctx.room, "connection_state", None)
     try:
@@ -407,10 +488,12 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
     telemetry: Optional[TurnTelemetry] = None
 
     try:
-        # Metadata sometimes only materializes after connecting to the room.
+        # Metadata may arrive via the room, or slightly later on the joining
+        # participant's JWT — poll both sources before giving up.
         if parsed is None:
             await ctx.connect()
-            parsed = parse_room_metadata(_room_metadata(ctx))
+            raw = await _wait_for_job_metadata(ctx)
+            parsed = parse_room_metadata(raw)
 
         if parsed is None:
             reason = (
@@ -470,7 +553,9 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             tts=bundle.tts,
             vad=silero.VAD.load(),
         )
-        telemetry = TurnTelemetry(session=session, backend=backend, call_id=call_id)
+        telemetry = TurnTelemetry(
+            session=session, backend=backend, call_id=call_id, room=ctx.room
+        )
         telemetry.attach()
 
         if not await _is_connected(ctx):
