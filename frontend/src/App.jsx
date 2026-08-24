@@ -10,6 +10,7 @@ import AgentBuilderPage from './pages/AgentBuilderPage.jsx';
 import CampaignsPage from './pages/CampaignsPage.jsx';
 import CampaignDetailPage from './pages/CampaignDetailPage.jsx';
 import CallDetailPage from './pages/CallDetailPage.jsx';
+import CallsIndexPage from './pages/CallsIndexPage.jsx';
 import GuidePage from './pages/GuidePage.jsx';
 import TestCallPage from './pages/TestCallPage.jsx';
 import PhoneNumbersPage from './pages/PhoneNumbersPage.jsx';
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="playground/:agentVersionId" element={<PlaygroundPage />} />
             <Route path="campaigns" element={<CampaignsPage />} />
             <Route path="campaigns/:id" element={<CampaignDetailPage />} />
+            <Route path="calls" element={<CallsIndexPage />} />
             <Route path="calls/:id" element={<CallDetailPage />} />
             <Route path="guide" element={<GuidePage />} />
             <Route path="test-call" element={<TestCallPage />} />

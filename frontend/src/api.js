@@ -204,6 +204,11 @@ export const api = {
 
   listDomainConfigs: () => apiFetch('/api/domain-configs'),
   listCampaignCalls: (campaignId) => apiFetch(`/api/campaigns/${campaignId}/calls`),
+  listCalls: ({ limit = 500, agentVersionId } = {}) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (agentVersionId != null) params.set('agent_version_id', String(agentVersionId));
+    return apiFetch(`/api/calls?${params.toString()}`);
+  },
   getCall: (callId) => apiFetch(`/api/calls/${callId}`),
   placeTestCall: (data) => apiFetch('/api/test-call', { method: 'POST', body: JSON.stringify(data) }),
 

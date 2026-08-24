@@ -1,16 +1,21 @@
-"""Call list + detail endpoints (org-scoped per contract §4)."""
+"""Call list + detail endpoints (org-scoped per contract §4).
+
+``GET /api/calls`` is the cross-campaign call history feed (Overview page and
+the Call History table both read it); ``GET /api/calls/{call_id}`` is the
+per-call detail payload used by the transcript view.
+"""
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import Call, Campaign, Contact, ExtractedField, Transcript, User
-from app.schemas import CampaignCallOut, CallDetailOut
+from app.models import Agent, AgentVersion, Call, Campaign, Contact, ExtractedField, Transcript, User
+from app.schemas import CampaignCallOut, CallDetailOut, CallListItemOut
 
 router = APIRouter(prefix="/api", tags=["calls"])
 
@@ -21,6 +26,66 @@ def _call_org_id(db: Session, call: Call) -> Any:
         return call.org_id
     campaign = db.get(Campaign, call.campaign_id) if call.campaign_id else None
     return campaign.org_id if campaign else None
+
+
+def _org_call_filter(org_id: int):
+    """SQL predicate matching calls whose effective org is ``org_id``."""
+    return or_(Call.org_id == org_id, Campaign.org_id == org_id)
+
+
+# Avg end-to-end latency per call (single grouped scan, joined in below).
+_avg_e2e_subq = (
+    select(Transcript.call_id, func.avg(Transcript.e2e_ms).label("avg_e2e_ms"))
+    .where(Transcript.e2e_ms.isnot(None))
+    .group_by(Transcript.call_id)
+    .subquery()
+)
+
+
+@router.get("/calls", response_model=list[CallListItemOut])
+def list_calls(
+    limit: int = 500,
+    agent_version_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Most recent org-scoped calls across every campaign + playground."""
+    capped_limit = max(1, min(limit, 1000))
+    stmt = (
+        select(
+            Call,
+            Contact.name,
+            Contact.phone,
+            Agent.name,
+            _avg_e2e_subq.c.avg_e2e_ms,
+        )
+        .outerjoin(Contact, Contact.id == Call.contact_id)
+        .outerjoin(Campaign, Campaign.id == Call.campaign_id)
+        .outerjoin(AgentVersion, AgentVersion.id == Call.agent_version_id)
+        .outerjoin(Agent, Agent.id == AgentVersion.agent_id)
+        .outerjoin(_avg_e2e_subq, _avg_e2e_subq.c.call_id == Call.id)
+        .where(_org_call_filter(user.org_id))
+    )
+    if agent_version_id is not None:
+        stmt = stmt.where(Call.agent_version_id == agent_version_id)
+    rows = db.execute(stmt.order_by(Call.id.desc()).limit(capped_limit)).all()
+    return [
+        {
+            "id": call.id,
+            "status": call.status,
+            "kind": call.kind or "phone",
+            "duration_seconds": call.duration_seconds,
+            "started_at": call.started_at,
+            "created_at": call.created_at,
+            "agent_version_id": call.agent_version_id,
+            "agent_name": agent_name,
+            "contact_name": contact_name,
+            "contact_phone": contact_phone,
+            "avg_e2e_ms": round(float(avg_e2e), 1) if avg_e2e is not None else None,
+            "flagged_for_human": call.flagged_for_human,
+        }
+        for call, contact_name, contact_phone, agent_name, avg_e2e in rows
+    ]
 
 
 @router.get("/campaigns/{campaign_id}/calls", response_model=list[CampaignCallOut])
