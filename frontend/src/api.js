@@ -163,6 +163,12 @@ export const playgroundApi = {
       body: JSON.stringify({ agent_version_id: agentVersionId }),
     }),
   completeSession: (callId) => apiFetch(`/api/playground/sessions/${callId}/complete`, { method: 'POST' }),
+  // Text mode: one conversational turn (or {event:'start'} for the opening line).
+  sendTurn: (callId, body) =>
+    apiFetch(`/api/playground/sessions/${callId}/turns`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
 
 export const devApi = {

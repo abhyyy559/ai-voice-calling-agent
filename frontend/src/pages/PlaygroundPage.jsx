@@ -10,6 +10,12 @@ const PHASES = {
   CONNECTING: 'connecting',
   IN_CALL: 'in_call',
   ENDED: 'ended',
+  TEXT: 'text',
+};
+
+const MODES = {
+  VOICE: 'voice',
+  TEXT: 'text',
 };
 
 const MIC_SPEAK_THRESHOLD = 0.12;
@@ -32,6 +38,7 @@ export default function PlaygroundPage() {
   const routeVersionId = params.agentVersionId ? Number(params.agentVersionId) : null;
 
   const [phase, setPhase] = useState(PHASES.SETUP);
+  const [mode, setMode] = useState(MODES.VOICE); // voice (mic) | text
 
   // ---- setup ----
   const [agents, setAgents] = useState(null);
@@ -43,7 +50,7 @@ export default function PlaygroundPage() {
   const [versionInfo, setVersionInfo] = useState(null); // {agentName, version}
   const [infoError, setInfoError] = useState(null);
 
-  // ---- live session ----
+  // ---- live session (voice mode) ----
   const [connectError, setConnectError] = useState(null);
   const [statusNote, setStatusNote] = useState(null);
   const [fatalError, setFatalError] = useState(null);
@@ -51,6 +58,14 @@ export default function PlaygroundPage() {
   const [micLevel, setMicLevel] = useState(0);
   const [bargeIn, setBargeIn] = useState(false);
   const [captions, setCaptions] = useState([]);
+
+  // ---- text session ----
+  const [chatMessages, setChatMessages] = useState([]); // [{speaker:'caller'|'agent', text}]
+  const [chatInput, setChatInput] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState(null);
+  const [chatDone, setChatDone] = useState(false);
+  const [liveFields, setLiveFields] = useState([]); // extracted so far
 
   // ---- post-call ----
   const [result, setResult] = useState(null);
@@ -391,10 +406,243 @@ export default function PlaygroundPage() {
     setCaptions([]);
     setElapsedMs(0);
     setBargeIn(false);
+    // text mode
+    setChatMessages([]);
+    setChatInput('');
+    setChatBusy(false);
+    setChatError(null);
+    setChatDone(false);
+    setLiveFields([]);
     setPhase(PHASES.SETUP);
   }
 
+  // ------------------------------------------------------- text mode handlers
+
+  function applyTurnResponse(res) {
+    if (!res) return;
+    if (res.reply_text) {
+      setChatMessages((prev) => [...prev, { speaker: 'agent', text: res.reply_text }]);
+    }
+    if (Array.isArray(res.extracted_fields) && res.extracted_fields.length > 0) {
+      setLiveFields((prev) => {
+        const byName = new Map(prev.map((f) => [f.field_name, f]));
+        res.extracted_fields.forEach((f) => byName.set(f.field_name, f));
+        return Array.from(byName.values());
+      });
+    }
+    if (res.done) setChatDone(true);
+  }
+
+  async function startTextCall() {
+    if (!selectedVersionId || chatBusy) return;
+    setResult(null);
+    setFatalError(null);
+    setConnectError(null);
+    setChatMessages([]);
+    setLiveFields([]);
+    setChatDone(false);
+    setChatError(null);
+    userEndedRef.current = false;
+
+    let sess = null;
+    try {
+      sess = await playgroundApi.startSession(Number(selectedVersionId));
+      sessionRef.current = sess; // same record shape as voice mode
+    } catch (e) {
+      setConnectError(e.message || 'Could not start a playground session.');
+      return;
+    }
+
+    setPhase(PHASES.TEXT); // no LiveKit join — straight to the chat panel
+    setChatBusy(true);
+    try {
+      const res = await playgroundApi.sendTurn(sess.call_id, { event: 'start' });
+      applyTurnResponse(res);
+    } catch (e) {
+      setChatError(e.message || 'The agent could not start the conversation.');
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  async function sendText(e) {
+    e.preventDefault();
+    const text = chatInput.trim();
+    if (!text || chatBusy || chatDone || !sessionRef.current) return;
+    setChatMessages((prev) => [...prev, { speaker: 'caller', text }]);
+    setChatInput('');
+    setChatBusy(true);
+    setChatError(null);
+    try {
+      const res = await playgroundApi.sendTurn(sessionRef.current.call_id, { text });
+      applyTurnResponse(res);
+    } catch (err) {
+      setChatError(err.message || 'Could not send that message.');
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  async function finishTextSession() {
+    if (!sessionRef.current) return;
+    setCompleting(true);
+    setCompleteError(null);
+    try {
+      const res = await playgroundApi.completeSession(sessionRef.current.call_id);
+      setResult(res || {});
+      setPhase(PHASES.ENDED); // reuse the full voice-mode report view
+    } catch (e) {
+      setCompleteError(e.message || 'Could not finalize the session.');
+    } finally {
+      setCompleting(false);
+    }
+  }
+
   // ------------------------------------------------------------------ render
+
+  const chatLogRef = useRef(null);
+  useEffect(() => {
+    const el = chatLogRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chatMessages, chatBusy]);
+
+  function renderFieldsTable(fields) {
+    return (
+      <div className="table-wrap">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Value</th>
+              <th style={{ width: '130px' }}>Confidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fields.map((f, i) => (
+              <tr key={`${f.field_name}-${i}`}>
+                <td className="cell-strong">{f.field_name}</td>
+                <td>{f.field_value != null ? String(f.field_value) : '—'}</td>
+                <td>
+                  <span className={`badge ${confidenceClass(f.confidence) || 'badge-gray'}`}>
+                    {f.confidence != null && !Number.isNaN(Number(f.confidence))
+                      ? `${Math.round(
+                          Number(f.confidence) <= 1 ? Number(f.confidence) * 100 : Number(f.confidence)
+                        )}%`
+                      : '—'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if (phase === PHASES.TEXT) {
+    return (
+      <div className="narrow-wide">
+        <div className="page-head">
+          <div>
+            <h2 className="page-title">Playground — text mode</h2>
+            <p className="page-sub">
+              Same agent, same conversation flow — typed instead of spoken. Everything is recorded exactly like a
+              voice test.
+            </p>
+          </div>
+        </div>
+
+        <div className="card chat-panel">
+          <div className="form-actions space-between">
+            <span className="meta-line">
+              {versionInfo && (
+                <>
+                  <span>
+                    <strong>Agent:</strong> {versionInfo.agentName || '(unknown)'}
+                  </span>
+                  <span>
+                    <strong>Version:</strong> v{versionInfo.version}
+                  </span>
+                </>
+              )}
+            </span>
+            <div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => {
+                  userEndedRef.current = true;
+                  finishTextSession();
+                }}
+                disabled={completing}
+              >
+                {completing ? 'Finishing…' : 'End session & show report'}
+              </button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={backToSetup}>
+                Back to setup
+              </button>
+            </div>
+          </div>
+
+          <div className="chat-log" ref={chatLogRef}>
+            {chatMessages.length === 0 && !chatBusy && (
+              <p className="hint">Starting the conversation…</p>
+            )}
+            {chatMessages.map((m, i) => (
+              <div key={i} className={`chat-row ${m.speaker === 'caller' ? 'caller' : 'agent'}`}>
+                <div className={`chat-bubble ${m.speaker === 'caller' ? 'bubble-caller' : 'bubble-agent'}`}>
+                  {m.text}
+                </div>
+              </div>
+            ))}
+            {chatBusy && (
+              <div className="chat-row agent">
+                <div className="chat-bubble bubble-agent hint">Typing…</div>
+              </div>
+            )}
+          </div>
+
+          {chatError && <div className="banner banner-error">{chatError}</div>}
+
+          {chatDone && (
+            <div className="banner banner-success">
+              <strong>Conversation complete.</strong> The agent ended this session.
+            </div>
+          )}
+
+          {liveFields.length > 0 && (
+            <div>
+              <h3 className="card-title">Extracted so far</h3>
+              {renderFieldsTable(liveFields)}
+            </div>
+          )}
+
+          {!chatDone ? (
+            <form className="chat-input-row" onSubmit={sendText}>
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Type your reply…"
+                disabled={chatBusy}
+                autoFocus
+                aria-label="Your message"
+              />
+              <button type="submit" className="btn btn-primary" disabled={chatBusy || !chatInput.trim()}>
+                Send
+              </button>
+            </form>
+          ) : (
+            <div className="form-actions">
+              <button type="button" className="btn btn-primary" onClick={finishTextSession} disabled={completing}>
+                {completing ? 'Collecting results…' : 'View full report'}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (phase === PHASES.IN_CALL || phase === PHASES.CONNECTING) {
     const connecting = phase === PHASES.CONNECTING;
@@ -489,34 +737,7 @@ export default function PlaygroundPage() {
               {fields.length === 0 ? (
                 <p className="hint">No structured fields were extracted during this call.</p>
               ) : (
-                <div className="table-wrap">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>Field</th>
-                        <th>Value</th>
-                        <th style={{ width: '130px' }}>Confidence</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {fields.map((f, i) => (
-                        <tr key={`${f.field_name}-${i}`}>
-                          <td className="cell-strong">{f.field_name}</td>
-                          <td>{f.field_value != null ? String(f.field_value) : '—'}</td>
-                          <td>
-                            <span className={`badge ${confidenceClass(f.confidence) || 'badge-gray'}`}>
-                              {f.confidence != null && !Number.isNaN(Number(f.confidence))
-                                ? `${Math.round(
-                                    Number(f.confidence) <= 1 ? Number(f.confidence) * 100 : Number(f.confidence)
-                                  )}%`
-                                : '—'}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                renderFieldsTable(fields)
               )}
               {result.outcome ? (
                 <p className="hint">
@@ -555,8 +776,8 @@ export default function PlaygroundPage() {
         <div>
           <h2 className="page-title">Playground</h2>
           <p className="page-sub">
-            Test any saved agent version straight from this browser. Nothing is dialed — the conversation runs over
-            your microphone, so it costs zero telephony minutes.
+            Test any saved agent version straight from this browser — speak over your microphone or type in Text mode.
+            Nothing is dialed, so it costs zero telephony minutes.
           </p>
         </div>
       </div>
@@ -574,17 +795,31 @@ export default function PlaygroundPage() {
         </div>
       ) : (
         <div className="stack">
-          <div className="card">
-            <h3 className="card-title">Before you start</h3>
-            <p>
-              Your browser will ask for microphone permission — this is required so the agent can hear you. Audio plays
-              through your speakers or headset, exactly like a phone call. The whole conversation is recorded as a test
-              session you can review afterwards.
-            </p>
-            <p className="hint">
-              Tip: use headphones to avoid echo. If nothing seems to happen, check that the correct microphone is
-              selected in your browser's site settings.
-            </p>
+          <div className="tab-row" role="tablist" aria-label="Test mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === MODES.VOICE}
+              className={`tab-btn${mode === MODES.VOICE ? ' active' : ''}`}
+              onClick={() => {
+                setMode(MODES.VOICE);
+                setConnectError(null);
+              }}
+            >
+              Voice (mic)
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === MODES.TEXT}
+              className={`tab-btn${mode === MODES.TEXT ? ' active' : ''}`}
+              onClick={() => {
+                setMode(MODES.TEXT);
+                setConnectError(null);
+              }}
+            >
+              Text
+            </button>
           </div>
 
           {!routeVersionId && (
@@ -648,9 +883,52 @@ export default function PlaygroundPage() {
             </div>
           )}
 
-          {selectedVersionId && (
+          {selectedVersionId && mode === MODES.VOICE && (
+            <>
+              <div className="card">
+                <h3 className="card-title">Before you start</h3>
+                <p>
+                  Your browser will ask for microphone permission — this is required so the agent can hear you. Audio
+                  plays through your speakers or headset, exactly like a phone call. The whole conversation is recorded
+                  as a test session you can review afterwards.
+                </p>
+                <p className="hint">
+                  Tip: use headphones to avoid echo. If nothing seems to happen, check that the correct microphone is
+                  selected in your browser's site settings.
+                </p>
+              </div>
+              <div className="card">
+                <h3 className="card-title">Ready to talk</h3>
+                {versionInfo ? (
+                  <p className="meta-line">
+                    <span>
+                      <strong>Agent:</strong> {versionInfo.agentName || '(unknown)'}
+                    </span>
+                    <span>
+                      <strong>Version:</strong> v{versionInfo.version}
+                    </span>
+                  </p>
+                ) : (
+                  <p className="hint">Loading version details…</p>
+                )}
+                {connectError && <div className="banner banner-error">{connectError}</div>}
+                <div className="form-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-lg"
+                    onClick={startCall}
+                    disabled={phase === PHASES.CONNECTING || !selectedVersionId}
+                  >
+                    {phase === PHASES.CONNECTING ? 'Connecting…' : 'Enable microphone & start call'}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {selectedVersionId && mode === MODES.TEXT && (
             <div className="card">
-              <h3 className="card-title">Ready to talk</h3>
+              <h3 className="card-title">Ready to chat</h3>
               {versionInfo ? (
                 <p className="meta-line">
                   <span>
@@ -663,15 +941,14 @@ export default function PlaygroundPage() {
               ) : (
                 <p className="hint">Loading version details…</p>
               )}
+              <p className="hint">
+                No microphone or voice room needed. The agent opens with its disclosure and first question; reply by
+                typing. Extraction and the final report work exactly like a voice test.
+              </p>
               {connectError && <div className="banner banner-error">{connectError}</div>}
               <div className="form-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary btn-lg"
-                  onClick={startCall}
-                  disabled={phase === PHASES.CONNECTING || !selectedVersionId}
-                >
-                  {phase === PHASES.CONNECTING ? 'Connecting…' : 'Enable microphone & start call'}
+                <button type="button" className="btn btn-primary btn-lg" onClick={startTextCall}>
+                  Start text test call
                 </button>
               </div>
             </div>
