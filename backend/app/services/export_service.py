@@ -15,7 +15,7 @@ CSV_MEDIA_TYPE = "text/csv"
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 _FIXED_PREFIX = ["Name", "Phone", "External ID"]
-_FIXED_MIDDLE = ["Contact Status", "Call Status", "Outcome", "Duration (s)"]
+_FIXED_MIDDLE = ["Contact Status", "Call Status", "Outcome", "Duration (s)", "E2E Latency (ms)"]
 _FIXED_SUFFIX = ["Flagged For Human", "Summary", "Recording URL", "Transcript"]
 
 
@@ -52,6 +52,7 @@ def _collect_data(db: Session, campaign_id: int) -> tuple[list[str], list[list[A
 
     field_values: dict[int, dict[str, str]] = {}
     transcripts_by_call: dict[int, list[str]] = {}
+    e2e_by_call: dict[int, float] = {}
     if calls:
         call_ids = [c.id for c in calls]
         for f in db.scalars(select(ExtractedField).where(ExtractedField.call_id.in_(call_ids))):
@@ -62,6 +63,17 @@ def _collect_data(db: Session, campaign_id: int) -> tuple[list[str], list[list[A
             .order_by(Transcript.call_id, Transcript.turn_index)
         ):
             transcripts_by_call.setdefault(t.call_id, []).append(f"{t.speaker}: {t.text}")
+        # Avg end-to-end turn latency over the turns that reported it.
+        e2e_sums: dict[int, tuple[float, int]] = {}
+        for t in db.scalars(
+            select(Transcript).where(
+                Transcript.call_id.in_(call_ids), Transcript.e2e_ms.isnot(None)
+            )
+        ):
+            total, n = e2e_sums.get(t.call_id, (0.0, 0))
+            e2e_sums[t.call_id] = (total + float(t.e2e_ms), n + 1)
+        for call_id_value, (total, n) in e2e_sums.items():
+            e2e_by_call[call_id_value] = round(total / n, 1)
 
     rows: list[list[Any]] = []
     for contact in contacts:
@@ -78,6 +90,7 @@ def _collect_data(db: Session, campaign_id: int) -> tuple[list[str], list[list[A
             call.status if call else "",
             (call.outcome or "") if call else "",
             call.duration_seconds if call and call.duration_seconds is not None else "",
+            e2e_by_call.get(call.id, "") if call else "",
         ]
         row += [fields.get(name, "") for name in extracted_names]
         row += [
