@@ -136,8 +136,14 @@ def build_providers(
     model_override, tts_voice_override = _voice_overrides(voice_settings)
 
     if settings.deepgram_api_key:
+        # P0-1 endpointing tuning: the livekit-plugins-deepgram 1.7.0 kwarg is
+        # ``endpointing_ms`` (introspected signature has NO ``endpointing``);
+        # plugin default is a hair-trigger 25 ms which fragments speech.
         bundle.stt = deepgram.STT(
-            model="nova-3", language="en", api_key=settings.deepgram_api_key
+            model="nova-3",
+            language="en",
+            endpointing_ms=200,
+            api_key=settings.deepgram_api_key,
         )
     else:
         bundle.problems.append(
@@ -192,9 +198,11 @@ class TurnTelemetry:
     """Accumulates one exchange (user utterance + agent reply), posts it.
 
     Latency definitions (all milliseconds):
-    - ``stt_final_ms``: end-of-speech -> final user transcript (prefers the
-      LiveKit EOU metric ``end_of_utterance_delay + transcription_delay``;
-      wall-clock fallback otherwise).
+    - ``stt_final_ms``: end-of-speech -> final user transcript = LiveKit EOU
+      metric ``end_of_utterance_delay`` ONLY (EOU decision time).
+    - ``transcription_delay_ms``: Deepgram finalization lag
+      (EOU metric ``transcription_delay``), logged separately so the two STT
+      levers are distinguishable (P0-1).
     - ``llm_first_token_ms``: LLM time-to-first-token (``LLMMetrics.ttft``).
     - ``tts_first_audio_ms``: TTS time-to-first-audio-byte (``TTSMetrics.ttfb``).
     - ``e2e_ms``: approximated speech-to-speech =
@@ -251,6 +259,7 @@ class TurnTelemetry:
         self._reply_start_at: Optional[float] = None
         self._got_agent_item = False
         self._stt_final_ms: Optional[float] = None
+        self._transcription_delay_ms: Optional[float] = None
         self._llm_first_token_ms: Optional[float] = None
         self._tts_first_audio_ms: Optional[float] = None
 
@@ -356,11 +365,18 @@ class TurnTelemetry:
         metrics = getattr(ev, "metrics", ev)  # unwrap MetricsCollectedEvent
         metric_type = str(getattr(metrics, "type", "") or "")
         if metric_type == "eou_metrics":
-            delay_s = float(
+            # P0-1 split: stt_final_ms = EOU decision only; Deepgram
+            # finalization lag is logged separately as transcription_delay_ms.
+            eou_s = float(
                 getattr(metrics, "end_of_utterance_delay", 0.0) or 0.0
-            ) + float(getattr(metrics, "transcription_delay", 0.0) or 0.0)
-            if delay_s > 0:
-                self._stt_final_ms = delay_s * 1000.0
+            )
+            if eou_s > 0:
+                self._stt_final_ms = eou_s * 1000.0
+            transcription_s = float(
+                getattr(metrics, "transcription_delay", 0.0) or 0.0
+            )
+            if transcription_s > 0:
+                self._transcription_delay_ms = transcription_s * 1000.0
         elif metric_type == "llm_metrics":
             ttft_seconds = float(getattr(metrics, "ttft", -1.0))
             if ttft_seconds > 0:
@@ -438,6 +454,9 @@ class TurnTelemetry:
                         "turn_index": turn_index,
                         "posted": ok,
                         "stt_final_ms": self._round(self._stt_final_ms),
+                        "transcription_delay_ms": self._round(
+                            self._transcription_delay_ms
+                        ),
                         "llm_first_token_ms": self._round(self._llm_first_token_ms),
                         "tts_first_audio_ms": self._round(self._tts_first_audio_ms),
                         "e2e_ms": self._round(e2e_ms),

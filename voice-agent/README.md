@@ -87,10 +87,24 @@ with `status=error`.
 
 | Field | Meaning | Target (NFR-1) |
 |---|---|---|
-| `stt_final_ms` | end-of-speech → final user transcript (LiveKit EOU delay) | — |
+| `stt_final_ms` | end-of-speech → final user transcript = LiveKit **EOU delay only** (P0-1) | — |
+| `transcription_delay_ms` | Deepgram STT finalization lag, logged separately from EOU (P0-1) | — |
 | `llm_first_token_ms` | LLM time-to-first-token | — |
 | `tts_first_audio_ms` | TTS time-to-first-audio-byte | — |
-| `e2e_ms` | approximated speech-to-speech = sum of the above | median ≤900ms, P95 ≤1.5s |
+| `e2e_ms` | approximated speech-to-speech = stt + llm + tts above | median ≤900ms, P95 ≤1.5s |
+
+### Deepgram endpointing tuning (P0-1)
+
+Introspected `livekit-plugins-deepgram` 1.7.0 via
+`inspect.signature(deepgram.STT)`: there is **no `endpointing` kwarg** — the
+plugin spells it **`endpointing_ms`**, and its default (`25` ms) is a
+hair-trigger that can fragment speech into premature finals. The pipeline
+constructs STT with `endpointing_ms=200`. If a future plugin version renames
+the kwarg again, re-check with:
+
+```powershell
+voice-agent\.venv\Scripts\python.exe -c "import inspect; from livekit.plugins import deepgram; print(inspect.signature(deepgram.STT))"
+```
 
 ## Extraction & escalation rules (FR-12)
 
