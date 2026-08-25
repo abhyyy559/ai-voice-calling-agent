@@ -72,7 +72,7 @@ export default function LandingPage() {
           <p className="land-section-sub">Three steps from idea to a campaign that dials real people.</p>
           <div className="land-steps-grid">
             {STEPS.map((s, i) => (
-              <div key={s.n} className="land-step-card" data-reveal style={{ transitionDelay: `${i * 90}ms` }}>
+              <div key={s.n} className="land-step-card" data-reveal style={{ animationDelay: `${i * 90}ms` }}>
                 <div className="land-step-num">{s.n}</div>
                 <h3>{s.title}</h3>
                 <p>{s.body}</p>

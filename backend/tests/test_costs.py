@@ -16,7 +16,6 @@ from conftest import auth_headers, register
 def _seed_calls(db: Any, org_id: int) -> None:
     org = db.get(Organization, org_id)
     assert org is not None
-    base_started = None  # timestamps default via server_default; set explicitly below
     from app.timeutil import utcnow
 
     now = utcnow()
