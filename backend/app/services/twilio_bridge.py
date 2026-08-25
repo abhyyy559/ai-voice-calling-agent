@@ -18,6 +18,7 @@ class MediaEvent:
     stream_sid: str
     media_payload: str
     call_id: str
+    call_sid: str = ""
 
 
 def parse_stream_event(raw: Any) -> MediaEvent:
@@ -32,13 +33,25 @@ def parse_stream_event(raw: Any) -> MediaEvent:
         if not event:
             raise ValueError("missing event")
         start = msg.get("start") or {}
-        params = start.get("parameters") or {} if isinstance(start, Mapping) else {}
+        params: Mapping[str, Any] = {}
+        call_sid = ""
+        if isinstance(start, Mapping):
+            # Real start frames carry call_id in customParameters; keep the
+            # legacy flat `parameters` key as a fallback.
+            custom = start.get("customParameters")
+            if isinstance(custom, Mapping):
+                params = custom
+            else:
+                legacy = start.get("parameters")
+                params = legacy if isinstance(legacy, Mapping) else {}
+            call_sid = str(start.get("callSid") or "")
         media = msg.get("media") or {}
         return MediaEvent(
             event=event,
             stream_sid=str(msg.get("streamSid") or ""),
             media_payload=str(media.get("payload") or "") if isinstance(media, Mapping) else "",
             call_id=str(params.get("call_id") or "") if isinstance(params, Mapping) else "",
+            call_sid=call_sid,
         )
     except ValueError:
         raise

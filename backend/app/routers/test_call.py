@@ -68,7 +68,11 @@ def place_test_call(
         raise HTTPException(status_code=422, detail="unknown domain_config_id")
 
     if payload.agent_version_id is not None:
-        version = db.get(AgentVersion, payload.agent_version_id)
+        version = db.scalar(
+            select(AgentVersion)
+            .join(Agent, Agent.id == AgentVersion.agent_id)
+            .where(AgentVersion.id == payload.agent_version_id, Agent.org_id == user.org_id)
+        )
         if version is None:
             raise HTTPException(status_code=422, detail="unknown agent_version_id")
     else:

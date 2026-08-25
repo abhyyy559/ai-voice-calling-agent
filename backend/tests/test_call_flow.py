@@ -5,15 +5,15 @@ from typing import Any
 
 import pytest
 
-from app.models import Agent, AgentVersion, Call, DomainConfig
+from app.models import Agent, AgentVersion, Call, DomainConfig, Organization
 from conftest import auth_headers, register
 
 TO = "+919391470646"
 
 
-def _seed_domain_and_agent(db: Any, org_id: int) -> tuple[int, int]:
+def _seed_domain_and_agent(db: Any, org_id: int, dc_name: str = "call-flow-test") -> tuple[int, int]:
     """Seed a minimal domain config + agent version; return (domain_config_id, version_id)."""
-    dc = DomainConfig(name="call-flow-test", version=1)
+    dc = DomainConfig(name=dc_name, version=1)
     db.add(dc)
     db.flush()
     agent = Agent(org_id=org_id, name="Phone Agent", description="", status="draft")
@@ -69,6 +69,29 @@ def test_unknown_agent_version_422(client, session_factory, allowlisted):
         client,
         token,
         {"to": TO, "domain_config_id": dc_id, "agent_version_id": 99999},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "unknown agent_version_id"
+
+
+def test_foreign_org_agent_version_422(client, session_factory, allowlisted):
+    token, user = register(client)
+    with session_factory() as db:
+        dc_id, _own_version_id = _seed_domain_and_agent(db, user["org_id"])
+        foreign_org = Organization(name="Foreign Org", slug="foreign-org")
+        db.add(foreign_org)
+        db.flush()
+        _, foreign_version_id = _seed_domain_and_agent(
+            db, foreign_org.id, dc_name="call-flow-foreign"
+        )
+    resp = _post(
+        client,
+        token,
+        {
+            "to": TO,
+            "domain_config_id": dc_id,
+            "agent_version_id": foreign_version_id,
+        },
     )
     assert resp.status_code == 422
     assert resp.json()["detail"] == "unknown agent_version_id"
