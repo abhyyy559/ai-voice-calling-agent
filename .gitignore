@@ -99,3 +99,6 @@ tmp/
 temp/
 *.log
 frontend/dist/
+
+# SDD session scratch (briefs/reports/diffs; ledger stays tracked)
+.superpowers/sdd/task-*

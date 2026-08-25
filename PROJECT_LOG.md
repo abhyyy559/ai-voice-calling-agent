@@ -160,3 +160,14 @@ The `domain-configs/` directory holds versioned JSON configs. The `backend/domai
 - Known minors: Groq free-tier TPM 429 on rapid text turns; frontend container healthcheck IPv6 false-negative (serves fine); heuristic extractor occasionally misses fragmented STT finals (LLM tool-call path covers it).
 - Pending owner actions: GitHub repo URL to push; real Twilio creds + 'go twilio' for phone phase.
 
+---
+
+## 2026-08-25 — Phase 1 closeout (cost dashboard + landing polish)
+
+- **Cost dashboard**: backend `GET /api/analytics/costs` (org-scoped, monthly buckets, flat $/min pricing consts) + "Est. Spend" stat card on Overview. Rates are estimates — update `PRICING_USD_PER_MINUTE` per provider invoices.
+- **Landing motion**: `useReveal` IntersectionObserver hook, staggered step-card reveals, glassmorphism accents; fully disabled under `prefers-reduced-motion`.
+- **Verification**: 81/81 backend tests, `vite build` clean.
+- **Still owner-blocked**: Groq Dev tier (P0-5), Twilio keys/tunnel (parallel-calls demo).
+- Design spec: `docs/superpowers/specs/2026-08-25-phase1-finish-design.md`.
+- Queued next: external tool bindings (calendar/appointment booking via agent tool-calling).
+

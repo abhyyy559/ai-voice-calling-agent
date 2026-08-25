@@ -1,6 +1,6 @@
 # Project Status — AI Voice Calling Agent ("VocalIQ")
 
-Last updated: 2026-08-25 · Phase: **1 (Web) COMPLETE** · Head: `3abc15e`
+Last updated: 2026-08-25 · Phase: **1 COMPLETE (closed out)** · See `git log` for head.
 
 ---
 
@@ -33,19 +33,19 @@ Also noted from transcript: the demo agent addressed a non-parent as parent ("yo
 
 ## 3. Pending — P0 (this phase)
 
-- [ ] **P0-1 STT latency**: Deepgram endpointing tuning + split EOU vs transcription delay metrics
-- [ ] **P0-2 Personalized opening**: pipe contact fields (`student_name`, `parent_name`, …) from campaign row → room metadata → rendered system prompt ("I'm calling from XYZ university about your child Aarav… may I speak with his parent?"), plus a mandatory verify-parent step in the absent-student flow
-- [ ] **P0-3 Strict-guardrails block** in every prompt: refuse off-topic questions ("Who is India's PM?"), never disclose other students' data, wrap up fast (calls cost money), offer human handoff when caller drifts or demands more help
-- [ ] **P0-4 Caption lag in audio mode**: publish partial transcripts (not just finals) over the data channel
+- [x] **P0-1 STT latency**: DONE — Deepgram `endpointing_ms=200` shipped (commit `7d28763`); EOU vs transcription delay split logged in turn_latency. Fresh live measurement still owed at next test-call session.
+- [x] **P0-2 Personalized opening**: DONE end-to-end (commit `6b24f86`) — contact fields persist on calls.context, packed into room/token metadata, CALLER CONTEXT prompt section + verify-relationship rule in voice + text modes, migration 0003.
+- [x] **P0-3 Strict-guardrails block** in every prompt: refuse off-topic questions ("Who is India's PM?"), never disclose other students' data, wrap up fast (calls cost money), offer human handoff when caller drifts or demands more help
+- [x] **P0-4 Caption lag in audio mode**: publish partial transcripts (not just finals) over the data channel
 - [ ] **P0-5 Groq Dev tier** (owner action) to remove p95 spikes + TPM 429s
 
 ## 4. Pending — P1
 
-- [ ] Parallel outbound calling demo (3–4 simultaneous) — needs Twilio keys/tunnel; dialer concurrency already built
-- [ ] Cost dashboard: ₹/minute per call/campaign/month (token+telephony metering already logged per turn)
-- [ ] Export v2 columns: call status (answered/no-answer/busy/callback-later) + extracted key info + sales-disposition field for non-education agents
-- [ ] Landing page motion pass (scroll animations, glassmorphism, public 60-sec capped mic demo for unauthenticated visitors)
-- [ ] Frontend container healthcheck IPv6 false-negative fix
+- [ ] Parallel outbound calling demo (3–4 simultaneous) — BLOCKED on owner: Twilio keys/tunnel; dialer concurrency already built
+- [x] Cost dashboard: org-scoped GET /api/analytics/costs + "Est. Spend" card on Overview ($/min constants in analytics.PRICING_USD_PER_MINUTE — update per invoice)
+- [x] Export v2 columns: call status/duration/extracted fields/custom fields + E2E Latency column (shipped commit `0d3087f`)
+- [x] Landing page motion pass: scroll-reveal + glassmorphism accents, prefers-reduced-motion safe (public mic demo intentionally deferred — new auth surface)
+- [x] Frontend container healthcheck IPv6 false-negative fix
 
 ## 5. Phase 2 roadmap (agreed, not started)
 
@@ -88,4 +88,13 @@ E2E test: voice-agent\.venv\Scripts\python.exe scripts\e2e_caller.py --wav calle
 - [x] P1 healthcheck IPv6 fix (frontend now healthy)
 - [x] Cleanup executed per approval (logs, dist untracked, test_validate.py removed; .gitignore hardened)
 - [ ] Still open this phase: P0-1 STT endpointing tuning, P0-2 personalized opening + parent-verify wiring, P0-5 Groq Dev tier (owner), P1 cost dashboard + export v2 + landing motion pass; parallel-calls demo waits on Twilio keys.
+
+## Update 2026-08-25 (closeout #2)
+
+- [x] P0-1/P0-2 marked done (were committed in `7d28763` / `6b24f86`; doc lagged)
+- [x] P1 cost dashboard shipped: `/api/analytics/costs` + Overview "Est. Spend" card (81 backend tests green, vite build clean)
+- [x] P1 landing motion pass shipped (`useReveal` hook + CSS reveal layer, zero deps, reduced-motion safe)
+- [ ] Owner-blocked: P0-5 Groq Dev tier, Twilio keys for parallel-calls demo
+- [ ] Queued next: external tool bindings (calendar / appointment booking via agent tool-calling) — design pass pending; Phase 2 roadmap starts in a few days
+
 
