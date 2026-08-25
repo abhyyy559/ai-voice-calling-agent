@@ -65,9 +65,13 @@ Accepts Twilio Media Streams protocol:
 - `TestCallRequest` += optional `agent_version_id`; resolution order: explicit →
   latest AgentVersion in caller's org → 404 if none
 - After successful `place_call`:
-  - room_name = `phone-{call.id}`; metadata = `{"version_id", "call_id", "contact": {name, student fields…}}`
-  - `RoomService.create_room` + `update_room_metadata` (best-effort pattern copied
-    from playground; failure ⇒ mark call failed, do NOT leave a ringing orphan)
+  - resolved version persisted on the Call row (`calls.agent_version_id`)
+  - room_name = `phone-{call.id}`; when Twilio answers and opens the media WS, the
+    backend mints the bridge's join token carrying metadata
+    `{"version_id", "call_id", "contact"}` — the bridge's implicit room join creates
+    the LiveKit room, and `run_session`'s existing participant-metadata fallback
+    picks the payload up (no separate create_room call needed)
+  - failure of dial ⇒ call marked failed exactly as today
 - Response += `room_name`
 
 ### 5. Config & env (backend Settings — names unchanged consumers)
