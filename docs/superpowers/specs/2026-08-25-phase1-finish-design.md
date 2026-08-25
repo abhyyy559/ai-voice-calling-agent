@@ -41,7 +41,9 @@ File boundary: `frontend/src/pages/OverviewPage.jsx` only.
 ### Unit B — Landing motion pass (frontend-agent, parallel with A)
 
 File boundary: `frontend/src/pages/LandingPage.jsx` plus at most one new small hook
-file (e.g. `src/hooks/useReveal.js`). No other files.
+file (e.g. `src/hooks/useReveal.js`), plus an append-only section at the end of
+`frontend/src/styles.css` (the codebase's single design-system file — reveal/glass
+rules must live there). No other files.
 
 - Scroll-reveal fade/rise on hero and feature cards via IntersectionObserver.
 - Glassmorphism accents consistent with existing token palette.
