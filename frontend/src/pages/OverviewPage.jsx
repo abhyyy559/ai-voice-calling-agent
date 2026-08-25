@@ -40,6 +40,7 @@ function StatCard({ label, value, unit, foot }) {
 export default function OverviewPage() {
   const navigate = useNavigate();
   const [summary, setSummary] = useState(null);
+  const [costs, setCosts] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -51,6 +52,10 @@ export default function OverviewPage() {
       .then(setSummary)
       .catch((e) => setError(e.message || String(e)))
       .finally(() => setLoading(false));
+    analyticsApi
+      .costs()
+      .then(setCosts)
+      .catch(() => setCosts(null));
   }
 
   useEffect(load, []);
@@ -63,6 +68,8 @@ export default function OverviewPage() {
         : null;
   const latencyOnTarget = medianLatency != null && medianLatency <= LATENCY_TARGET_MS;
   const maxDayCount = summary ? Math.max(1, ...summary.calls_last_7d.map((d) => d.count)) : 1;
+  const monthKey = new Date().toISOString().slice(0, 7);
+  const monthCosts = costs && costs.monthly ? costs.monthly[monthKey] : null;
 
   return (
     <div>
@@ -127,6 +134,18 @@ export default function OverviewPage() {
               }
             />
             <StatCard label="Fields Captured" value={summary.total_extracted_fields} foot={<span>structured values extracted</span>} />
+            <StatCard
+              label="Est. Spend"
+              value={monthCosts ? `$${monthCosts.est_cost_usd.toFixed(2)}` : costs ? '$0.00' : '—'}
+              foot={
+                <span>
+                  {monthCosts
+                    ? `${monthCosts.minutes.toLocaleString()} min this month`
+                    : 'no billable minutes yet'}{' '}
+                  · telephony+STT+LLM+TTS @ ~$0.025/min est.
+                </span>
+              }
+            />
           </div>
 
           <div className="overview-grid">

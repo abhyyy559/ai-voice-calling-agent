@@ -19,12 +19,21 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import Agent, AgentVersion, Call, Campaign, ExtractedField, Transcript, User
-from app.schemas import AnalyticsSummaryOut
+from app.schemas import AnalyticsCostsOut, AnalyticsSummaryOut
 from app.timeutil import utcnow
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 RECENT_CALLS_LIMIT = 8
+
+# update per invoice
+PRICING_USD_PER_MINUTE: dict[str, float] = {
+    "telephony": 0.0120,          # Plivo outbound local (India) sample rate
+    "stt_deepgram_nova3": 0.0043, # Deepgram nova-3 streaming
+    "tts_cartesia": 0.0080,       # Cartesia sonic English
+    "llm_groq": 0.0007,           # Groq small-model share per voice minute
+}
+_RATE_PER_MINUTE_USD = sum(PRICING_USD_PER_MINUTE.values())
 
 
 def _org_call_filter(org_id: int):
@@ -133,4 +142,53 @@ def analytics_summary(
         "total_extracted_fields": total_extracted_fields,
         "calls_last_7d": calls_last_7d,
         "recent_calls": recent_calls,
+    }
+
+
+def _minutes(duration_seconds: Any) -> float:
+    return round(float(duration_seconds) / 60.0, 1) if duration_seconds else 0.0
+
+
+@router.get("/costs", response_model=AnalyticsCostsOut)
+def analytics_costs(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Org-scoped estimated spend from per-call durations and PRICING consts.
+
+    Minutes come from ``calls.duration_seconds``; calls without a duration
+    (still in flight, or never answered) contribute nothing.
+    """
+    calls = db.scalars(
+        select(Call)
+        .outerjoin(Campaign, Campaign.id == Call.campaign_id)
+        .where(_org_call_filter(user.org_id), Call.duration_seconds.isnot(None))
+        .order_by(Call.id)
+    ).all()
+
+    total_minutes = 0.0
+    per_call: list[dict[str, Any]] = []
+    monthly: dict[str, dict[str, float]] = {}
+    for call in calls:
+        minutes = _minutes(call.duration_seconds)
+        if minutes <= 0:
+            continue
+        cost = round(minutes * _RATE_PER_MINUTE_USD, 4)
+        total_minutes += minutes
+        per_call.append({"call_id": call.id, "minutes": minutes, "est_cost_usd": cost})
+        stamp = call.started_at or call.created_at
+        month_key = (stamp.date().strftime("%Y-%m")) if stamp else "unknown"
+        bucket = monthly.setdefault(month_key, {"minutes": 0.0, "est_cost_usd": 0.0})
+        bucket["minutes"] += minutes
+        bucket["est_cost_usd"] += cost
+
+    for bucket in monthly.values():
+        bucket["minutes"] = round(bucket["minutes"], 1)
+        bucket["est_cost_usd"] = round(bucket["est_cost_usd"], 4)
+
+    return {
+        "total_minutes": round(total_minutes, 1),
+        "est_cost_usd": round(total_minutes * _RATE_PER_MINUTE_USD, 4),
+        "per_call": per_call,
+        "monthly": monthly,
     }

@@ -197,6 +197,26 @@ class AnalyticsSummaryOut(BaseModel):
     recent_calls: list[RecentCallOut]
 
 
+class PerCallCostOut(BaseModel):
+    call_id: int
+    minutes: float
+    est_cost_usd: float
+
+
+class MonthlyCostOut(BaseModel):
+    minutes: float
+    est_cost_usd: float
+
+
+class AnalyticsCostsOut(BaseModel):
+    """Estimated spend (P1 cost dashboard). Rates live in analytics.PRICING_USD_PER_MINUTE."""
+
+    total_minutes: float
+    est_cost_usd: float
+    per_call: list[PerCallCostOut]
+    monthly: dict[str, MonthlyCostOut]  # "YYYY-MM" -> totals
+
+
 # --- call index (cross-campaign history) --------------------------------------
 
 

@@ -179,6 +179,7 @@ export const devApi = {
 
 export const analyticsApi = {
   summary: () => apiFetch('/api/analytics/summary'),
+  costs: () => apiFetch('/api/analytics/costs'),
 };
 
 // Legacy flat surface kept for existing pages (campaigns / contacts / calls).
