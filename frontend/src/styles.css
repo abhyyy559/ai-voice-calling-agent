@@ -3133,3 +3133,30 @@ th.preview-head-phone {
 .tp-toolbar {
   margin-bottom: 0;
 }
+
+/* ==========================================================================
+   Landing motion — scroll-reveal + glass accents
+   Animation gated behind prefers-reduced-motion: no-preference.
+   ========================================================================== */
+
+.land-step-card,
+.land-hero .land-eyebrow {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-reveal] {
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+      opacity 0.55s ease,
+      transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: opacity, transform;
+  }
+
+  [data-reveal].revealed {
+    opacity: 1;
+    transform: none;
+  }
+}

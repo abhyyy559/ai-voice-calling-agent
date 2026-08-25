@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import { getToken } from '../api.js';
+import useReveal from '../hooks/useReveal';
 
 const STEPS = [
   {
@@ -24,11 +25,13 @@ const STEPS = [
 ];
 
 export default function LandingPage() {
+  const revealRef = useReveal();
+
   // Already signed in? The landing page is only for logged-out visitors.
   if (getToken()) return <Navigate to="/" replace />;
 
   return (
-    <div className="landing">
+    <div className="landing" ref={revealRef}>
       <header className="land-top">
         <div className="land-brand">
           <div className="brand-mark">V</div>
@@ -49,12 +52,12 @@ export default function LandingPage() {
 
       <main className="land-main">
         <section className="land-hero">
-          <span className="land-eyebrow">AI voice calling for teams in India</span>
-          <h1 className="land-title">Build AI voice agents that talk to your customers</h1>
-          <p className="land-tagline">
+          <span className="land-eyebrow" data-reveal>AI voice calling for teams in India</span>
+          <h1 className="land-title" data-reveal>Build AI voice agents that talk to your customers</h1>
+          <p className="land-tagline" data-reveal>
             Train them here, hear them speak, then launch calling campaigns.
           </p>
-          <div className="land-cta-row">
+          <div className="land-cta-row" data-reveal>
             <Link className="btn btn-primary btn-lg" to="/login" state={{ mode: 'register' }}>
               Get started free
             </Link>
@@ -68,8 +71,8 @@ export default function LandingPage() {
           <h2 className="land-section-title">How it works</h2>
           <p className="land-section-sub">Three steps from idea to a campaign that dials real people.</p>
           <div className="land-steps-grid">
-            {STEPS.map((s) => (
-              <div key={s.n} className="land-step-card">
+            {STEPS.map((s, i) => (
+              <div key={s.n} className="land-step-card" data-reveal style={{ transitionDelay: `${i * 90}ms` }}>
                 <div className="land-step-num">{s.n}</div>
                 <h3>{s.title}</h3>
                 <p>{s.body}</p>
