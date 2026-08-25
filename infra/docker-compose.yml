@@ -62,26 +62,20 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/voice_agent
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: ${JWT_SECRET:-change_me_dev}
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change_me_internal}
       ENVIRONMENT: development
       LOG_LEVEL: info
-      # Browser origins allowed by CORS (frontend is served on :3000).
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
-      # LIVEKIT_URL here is what gets baked into playground tokens handed to
-      # the BROWSER - so it must be the host-facing URL, not the compose DNS
-      # name. The worker uses ws://livekit:7880 instead (see voice-agent below).
-      # Keys/secrets must match across backend / voice-agent / livekit and are
-      # therefore taken ONLY from ../.env via env_file above. Do NOT re-add
-      # ${LIVEKIT_API_*} interpolation here: it resolves on the HOST (root .env
-      # is not auto-loaded for -f infra/...) and silently overrode env_file
-      # with the placeholder, desyncing signing vs validation secrets.
-      LIVEKIT_URL: ws://localhost:7880
+      # Compose-internal mount path for domain configs (seed script + router).
+      DOMAIN_CONFIGS_DIR: /domain-configs
+      # Everything else (DATABASE_URL, REDIS_URL, JWT_SECRET,
+      # INTERNAL_API_TOKEN, CORS_ORIGINS, LIVEKIT_*, provider keys) comes from
+      # ../.env via env_file above. Do NOT re-add ${VAR:-default}
+      # interpolation here: it resolves against the HOST environment (root
+      # .env is not auto-loaded when invoking compose with -f infra/...),
+      # silently overriding env_file with placeholders. That desynced the
+      # internal service token (worker 401 -> agent apologizes mid-call) and
+      # the LiveKit secret (invalid-token on every join). Keep literals only.
       # Read-only mount so seed_demo.py can load domain-configs/*.json and the
       # domain-configs router can list them (DOMAIN_CONFIGS_DIR=/domain-configs).
-      DOMAIN_CONFIGS_DIR: /domain-configs
     ports:
       - "8000:8000"
     volumes:
