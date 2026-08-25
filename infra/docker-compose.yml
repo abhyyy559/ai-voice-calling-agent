@@ -109,11 +109,21 @@ services:
   livekit:
     image: livekit/livekit-server:latest
     container_name: voice-agent-livekit
-    command: ["--dev", "--bind", "0.0.0.0"]
-    environment:
-      # --dev defaults to key "devkey" / secret "secret". We override the secret
-      # so backend, voice-agent and this server all agree on LIVEKIT_API_SECRET.
-      LIVEKIT_KEYS: "devkey: ${LIVEKIT_API_SECRET:-secret_for_local_dev_only}"
+    env_file:
+      - ../.env
+    # Build LIVEKIT_KEYS from the SAME .env the backend/worker use, INSIDE the
+    # container. A host-side ${LIVEKIT_API_SECRET} interpolation silently fell
+    # back to a placeholder whenever compose ran without --env-file, so tokens
+    # were signed with one secret and validated with another ("signature is
+    # invalid" on every rejoin). Reading the file directly removes that trap.
+    # ($$ escapes compose interpolation; the container shell expands it.)
+    entrypoint: []
+    command:
+      [
+        "sh",
+        "-c",
+        "export LIVEKIT_KEYS=\"devkey: $${LIVEKIT_API_SECRET:-secret_for_local_dev_only}\" && exec /livekit-server --dev --bind 0.0.0.0",
+      ]
     ports:
       - "7880:7880"       # HTTP/WebSocket signaling
       - "7881:7881"       # RTC over TCP fallback
