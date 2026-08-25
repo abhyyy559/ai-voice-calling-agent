@@ -97,9 +97,10 @@ services:
       retries: 12
       start_period: 15s
     restart: unless-stopped
-    # Explicit for visibility (matches the image CMD; module path is the app
-    # package, not the legacy main.py shim).
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Apply pending migrations before serving, so the DB can never drift
+    # behind the image (a drifted schema surfaces as unhandled 500s that
+    # browsers misreport as CORS failures).
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
   # --- LiveKit (self-hosted dev server) ---------------------------------------
   # Included UNCONDITIONALLY (not behind a profile) because browser playground
