@@ -94,7 +94,15 @@ E2E test: voice-agent\.venv\Scripts\python.exe scripts\e2e_caller.py --wav calle
 - [x] P0-1/P0-2 marked done (were committed in `7d28763` / `6b24f86`; doc lagged)
 - [x] P1 cost dashboard shipped: `/api/analytics/costs` + Overview "Est. Spend" card (81 backend tests green, vite build clean)
 - [x] P1 landing motion pass shipped (`useReveal` hook + CSS reveal layer, zero deps, reduced-motion safe)
+- [x] Final review fix: reveal moved to keyframe animation so `.land-step-card` hover transitions survive (`e8792b6`)
 - [ ] Owner-blocked: P0-5 Groq Dev tier, Twilio keys for parallel-calls demo
 - [ ] Queued next: external tool bindings (calendar / appointment booking via agent tool-calling) — design pass pending; Phase 2 roadmap starts in a few days
+
+## Update 2026-08-25 (BETA v1 cut)
+
+- [x] **Clean-slate demo tenant** (`7c69848`): `seed_demo.py` now creates ONLY the demo org + login (`demo@example.com` / `demo1234`) + starter agent from absent-student.json. No campaigns, no fake contacts, no calls — testers see honest empty states.
+- [x] **Purge path for existing DBs**: `python scripts/seed_demo.py --purge-sample-data` wipes all demo-org campaigns/contacts/calls (transcripts/events/fields cascade); agents + users preserved. Run once against any DB that still carries old demo data.
+- [x] Verification: 83/83 backend tests.
+- [ ] Beta v1 = this head. v2 candidates after tester feedback: SaaS-level UI redesign of all pages (ui-ux-pro-max pass), calendar/appointment tool bindings for agents.
 
 
