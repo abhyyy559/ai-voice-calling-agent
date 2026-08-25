@@ -1,18 +1,24 @@
-"""Demo seed script — creates a demo tenant ready to explore the platform.
+"""Demo seed script — bootstraps a clean beta tenant.
 
-Usage (from backend/):  python scripts/seed_demo.py
+Usage (from backend/):
+    python scripts/seed_demo.py                      # create demo login (idempotent)
+    python scripts/seed_demo.py --purge-sample-data  # wipe demo org's campaigns/contacts/calls
 
 Creates (idempotently):
 - organization "Demo University" (slug demo-university)
 - owner user demo@example.com / demo1234
-- agent "Absent Student Follow-up" with v1 built from
+- starter agent "Absent Student Follow-up" with v1 built from
   domain-configs/absent-student.json
-- draft campaign pinning that version, with 5 sample contacts
+
+Beta policy: NO campaigns, NO sample contacts, NO calls are created — testers
+start from clean empty states and bring their own data. The starter agent is
+kept so the playground is usable immediately.
 
 The seed never places calls and contains no secrets.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -23,44 +29,16 @@ PROJECT_ROOT = BACKEND_DIR.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from sqlalchemy import inspect, select  # noqa: E402
+from sqlalchemy import delete, inspect, select  # noqa: E402
 
 from app.auth import hash_password  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.database import init_db  # noqa: E402
-from app.models import Agent, AgentVersion, Campaign, Contact, Organization, User  # noqa: E402
+from app.models import Agent, AgentVersion, Campaign, Call, Contact, Organization, User  # noqa: E402
 from domain_config_schema import validate_agent_version_payload  # noqa: E402
 
 DEMO_EMAIL = "demo@example.com"
 DEMO_PASSWORD = "demo1234"
-
-SAMPLE_CONTACTS: list[dict[str, Any]] = [
-    {
-        "name": "Ravi Sharma",
-        "phone": "+919000000001",
-        "custom_fields": {"student_name": "Aarav Sharma", "class": "10-A"},
-    },
-    {
-        "name": "Priya Patel",
-        "phone": "+919000000002",
-        "custom_fields": {"student_name": "Ishaan Patel", "class": "9-B"},
-    },
-    {
-        "name": "Sunita Reddy",
-        "phone": "+919000000003",
-        "custom_fields": {"student_name": "Ananya Reddy", "class": "11-C"},
-    },
-    {
-        "name": "Mohan Iyer",
-        "phone": "+919000000004",
-        "custom_fields": {"student_name": "Karthik Iyer", "class": "12-A"},
-    },
-    {
-        "name": "Fatima Khan",
-        "phone": "+919000000005",
-        "custom_fields": {"student_name": "Zoya Khan", "class": "10-B"},
-    },
-]
 
 
 def _alembic_upgrade_head(database_url: str) -> None:
@@ -90,6 +68,12 @@ def _version_payload_from_config(config: dict[str, Any]) -> dict[str, Any]:
         "escalation_rules": config["escalation_rules"],
         "voice_settings": {"voice_id": "default", "speed": 1.0},
     }
+
+
+def _demo_org_id(db: Any) -> int | None:
+    """Resolve the demo org id from the demo owner user (None if absent)."""
+    user = db.scalar(select(User).where(User.email == DEMO_EMAIL))
+    return user.org_id if user is not None else None
 
 
 def seed_demo(database_url: str | None = None) -> dict[str, Any]:
@@ -128,7 +112,7 @@ def seed_demo(database_url: str | None = None) -> dict[str, Any]:
         agent = Agent(
             org_id=org.id,
             name=config["display_name"] if "display_name" in config else config["name"],
-            description="Seeded demo agent — absent student follow-up calls.",
+            description="Starter agent — absent student follow-up calls.",
             status="draft",
         )
         db.add(agent)
@@ -156,29 +140,6 @@ def seed_demo(database_url: str | None = None) -> dict[str, Any]:
         db.flush()
         agent.current_version_id = version.id
 
-        campaign = Campaign(
-            org_id=org.id,
-            name="Absent Students - Demo Week",
-            agent_version_id=version.id,
-            status="draft",
-        )
-        db.add(campaign)
-        db.flush()
-
-        # Sample contacts are fictional numbers; consent=True lets the demo
-        # explore the launch flow. No real calls can happen without telephony
-        # credentials configured.
-        for sample in SAMPLE_CONTACTS:
-            db.add(
-                Contact(
-                    campaign_id=campaign.id,
-                    org_id=org.id,
-                    consent=True,
-                    consent_source="seed",
-                    **sample,
-                )
-            )
-
         db.commit()
 
         return {
@@ -188,22 +149,79 @@ def seed_demo(database_url: str | None = None) -> dict[str, Any]:
             "user_id": owner.id,
             "agent_id": agent.id,
             "version_id": version.id,
-            "campaign_id": campaign.id,
-            "contacts": len(SAMPLE_CONTACTS),
         }
 
 
+def purge_sample_data(database_url: str | None = None) -> dict[str, Any]:
+    """Wipe every campaign/contact/call row in the demo org (children cascade).
+
+    Keeps: organizations, users, agents + agent versions. Removes: campaigns,
+    contacts, calls (with their transcripts, extracted fields and events) —
+    i.e. everything a beta tester should not inherit from earlier demos.
+    """
+    settings = get_settings()
+    if database_url:
+        settings = settings.model_copy(update={"database_url": database_url})
+    engine, session_factory = init_db(settings)
+
+    inspector = inspect(engine)
+    if not inspector.has_table("organizations"):
+        _alembic_upgrade_head(settings.database_url)
+
+    with session_factory() as db:
+        org_id = _demo_org_id(db)
+        if org_id is None:
+            return {"status": "no_demo_tenant", "email": DEMO_EMAIL}
+
+        call_ids = db.scalars(
+            select(Call.id).where(Call.org_id == org_id)
+        ).all()
+        counts: dict[str, int] = {}
+        counts["calls"] = 0
+        for call_id in call_ids:
+            call = db.get(Call, call_id)
+            if call is not None:
+                db.delete(call)  # ORM cascades events/transcripts/extracted_fields
+                counts["calls"] += 1
+        db.flush()  # call deletes must hit the DB before campaigns (FK order)
+        counts["contacts"] = db.execute(
+            delete(Contact).where(Contact.org_id == org_id)
+        ).rowcount
+        counts["campaigns"] = db.execute(
+            delete(Campaign).where(Campaign.org_id == org_id)
+        ).rowcount
+        db.commit()
+        return {"status": "purged", "org_id": org_id, **counts}
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--purge-sample-data",
+        action="store_true",
+        help="Delete all demo-org campaigns/contacts/calls instead of seeding.",
+    )
+    args = parser.parse_args()
+
+    if args.purge_sample_data:
+        result = purge_sample_data()
+        if result["status"] == "no_demo_tenant":
+            print(f"No demo tenant found ({DEMO_EMAIL}) — nothing to purge.")
+            return
+        print("Demo org sample data purged:")
+        print(f"  campaigns: {result['campaigns']}")
+        print(f"  contacts : {result['contacts']}")
+        print(f"  calls    : {result['calls']} (transcripts/events/fields cascaded)")
+        return
+
     result = seed_demo()
     if result["status"] == "already_seeded":
         print(f"Demo tenant already exists ({DEMO_EMAIL}) — nothing to do.")
         return
     print("Demo tenant seeded:")
-    print(f"  login      : {DEMO_EMAIL} / {DEMO_PASSWORD}")
-    print(f"  org_id     : {result['org_id']}")
-    print(f"  agent_id   : {result['agent_id']} (version {result['version_id']})")
-    print(f"  campaign_id: {result['campaign_id']}")
-    print(f"  contacts   : {result['contacts']}")
+    print(f"  login    : {DEMO_EMAIL} / {DEMO_PASSWORD}")
+    print(f"  org_id   : {result['org_id']}")
+    print(f"  agent_id : {result['agent_id']} (version {result['version_id']})")
 
 
 if __name__ == "__main__":
