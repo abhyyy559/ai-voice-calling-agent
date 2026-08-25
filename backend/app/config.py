@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
 
+    # Container-facing LiveKit URL for server-side bridges (media gateway).
+    # Browser tokens keep using livekit_url.
+    livekit_url_internal: str = "ws://livekit:7880"
+
     # --- voice pipeline provider keys (presence-only checks by /api/health) ---
     # Consumed by the voice-agent worker; the backend never sends these anywhere.
     deepgram_api_key: str = ""

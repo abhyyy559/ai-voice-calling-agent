@@ -66,6 +66,8 @@ services:
       LOG_LEVEL: info
       # Compose-internal mount path for domain configs (seed script + router).
       DOMAIN_CONFIGS_DIR: /domain-configs
+      # Container-facing LiveKit URL for the /twilio/media server-side bridge.
+      LIVEKIT_URL_INTERNAL: ws://livekit:7880
       # Everything else (DATABASE_URL, REDIS_URL, JWT_SECRET,
       # INTERNAL_API_TOKEN, CORS_ORIGINS, LIVEKIT_*, provider keys) comes from
       # ../.env via env_file above. Do NOT re-add ${VAR:-default}

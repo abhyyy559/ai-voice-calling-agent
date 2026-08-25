@@ -19,3 +19,4 @@ livekit-api>=0.7
 pytest>=8.0
 httpx>=0.27
 audioop-lts>=0.2.2; python_version >= '3.13'
+livekit>=1.1,<2
