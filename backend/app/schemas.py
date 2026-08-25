@@ -128,8 +128,9 @@ class ImportResult(BaseModel):
 
 class CallOut(BaseModel):
     id: int
-    campaign_id: int
-    contact_id: int
+    # NULL for playground calls (no campaign/contact lineage).
+    campaign_id: Optional[int] = None
+    contact_id: Optional[int] = None
     provider_call_id: Optional[str]
     status: str
     started_at: Optional[datetime]
