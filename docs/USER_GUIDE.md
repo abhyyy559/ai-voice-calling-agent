@@ -169,3 +169,16 @@ When calls finish:
 
 *Found a gap in this guide? Tell the team — this file lives at
 `docs/USER_GUIDE.md`.*
+
+## Real phone test call (Twilio beta)
+
+Prereqs in `.env`: TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER,
+destination mobile verified in the Twilio console (trial rule), plus a public tunnel:
+
+    cloudflared tunnel --url http://localhost:8000
+
+Put the printed https URL into `.env` as PUBLIC_BASE_URL=... , restart backend
+(`docker compose -f infra/docker-compose.yml up -d backend --force-recreate`),
+open UI -> Test Call -> enter your verified number -> Start. Answer the phone;
+the Twilio trial preamble plays first, then the agent disclosure. Hang up from
+either side; view transcript + export XLSX from Call Detail.
