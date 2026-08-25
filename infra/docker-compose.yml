@@ -71,12 +71,14 @@ services:
       # Browser origins allowed by CORS (frontend is served on :3000).
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       # LIVEKIT_URL here is what gets baked into playground tokens handed to
-      # the BROWSER — so it must be the host-facing URL, not the compose DNS
+      # the BROWSER - so it must be the host-facing URL, not the compose DNS
       # name. The worker uses ws://livekit:7880 instead (see voice-agent below).
-      # Keys/secrets must still match across backend / voice-agent / livekit.
-      LIVEKIT_URL: ${LIVEKIT_URL:-ws://localhost:7880}
-      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
-      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret_for_local_dev_only}
+      # Keys/secrets must match across backend / voice-agent / livekit and are
+      # therefore taken ONLY from ../.env via env_file above. Do NOT re-add
+      # ${LIVEKIT_API_*} interpolation here: it resolves on the HOST (root .env
+      # is not auto-loaded for -f infra/...) and silently overrode env_file
+      # with the placeholder, desyncing signing vs validation secrets.
+      LIVEKIT_URL: ws://localhost:7880
       # Read-only mount so seed_demo.py can load domain-configs/*.json and the
       # domain-configs router can list them (DOMAIN_CONFIGS_DIR=/domain-configs).
       DOMAIN_CONFIGS_DIR: /domain-configs
