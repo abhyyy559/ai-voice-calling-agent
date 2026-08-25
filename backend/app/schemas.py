@@ -242,12 +242,14 @@ class CallListItemOut(BaseModel):
 class TestCallRequest(BaseModel):
     to: Optional[str] = None
     domain_config_id: int
+    agent_version_id: Optional[int] = None  # phone leg: which agent version speaks
 
 
 class TestCallOut(BaseModel):
     call_id: int
     provider_call_id: str
     status: str
+    room_name: str
 
 
 # --- internal (voice-agent) ----------------------------------------------------

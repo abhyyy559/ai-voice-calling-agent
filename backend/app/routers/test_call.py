@@ -14,11 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Call, Campaign, Contact, DomainConfig
+from app.deps import get_current_user
+from app.models import Agent, AgentVersion, Call, Campaign, Contact, DomainConfig, User
 from app.schemas import TestCallOut, TestCallRequest
 from app.services.calls_service import log_call_event
 from app.services.import_service import normalize_phone
 from app.services.telephony import TelephonyClient
+from app.services.twilio_bridge import PHONE_ROOM_PREFIX
 from app.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ def place_test_call(
     payload: TestCallRequest,
     request: Request,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     settings = request.app.state.settings
     allowlist = [
@@ -63,6 +66,21 @@ def place_test_call(
 
     if db.get(DomainConfig, payload.domain_config_id) is None:
         raise HTTPException(status_code=422, detail="unknown domain_config_id")
+
+    if payload.agent_version_id is not None:
+        version = db.get(AgentVersion, payload.agent_version_id)
+        if version is None:
+            raise HTTPException(status_code=422, detail="unknown agent_version_id")
+    else:
+        version = db.scalar(
+            select(AgentVersion)
+            .join(Agent, Agent.id == AgentVersion.agent_id)
+            .where(Agent.org_id == user.org_id)
+            .order_by(AgentVersion.id.desc())
+            .limit(1)
+        )
+        if version is None:
+            raise HTTPException(status_code=422, detail="no agent versions in org")
 
     campaign = db.scalar(select(Campaign).where(Campaign.name == TEST_CAMPAIGN_NAME))
     if campaign is None:
@@ -93,6 +111,7 @@ def place_test_call(
     call = Call(
         campaign_id=campaign.id,
         contact_id=contact.id,
+        agent_version_id=version.id,
         status="queued",
         started_at=now,
     )
@@ -118,4 +137,9 @@ def place_test_call(
     log_call_event(db, call.id, "test_call_placed", {"to": target})
     db.commit()
 
-    return {"call_id": call.id, "provider_call_id": sid, "status": call.status}
+    return {
+        "call_id": call.id,
+        "provider_call_id": sid,
+        "status": call.status,
+        "room_name": f"{PHONE_ROOM_PREFIX}{call.id}",
+    }
