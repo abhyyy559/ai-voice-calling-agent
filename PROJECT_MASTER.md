@@ -6487,6 +6487,15 @@ Assumptions: $1 ≈ ₹87 [EST]; connect-minute = billed phone minute; agent spe
 3. **Bulbul v3 Telugu MOS on OUR scripts** — blind-test 5 candidate voices with college-office staff; Sarvam's own docs warn voices vary by language.
 4. **Confirm Sarvam STT list price** (₹30/hr vs ₹1.5/min discrepancy) and enterprise cloning terms/pricing in writing.
 
+> **RESOLVED ADDENDUM (2026-08-26):** Saaras v3 STT pricing confirmed **₹30/hour = ₹0.50/min**
+> (docs.sarvam.ai/api-pricing — operative sheet; billed per second, rounded up). The
+> "₹1.5/min" marketing figure is stale — disregard. Also: **Sarvam-M deprecated Jul 2026**
+> → LLM tier = Sarvam-105B/30B chat API (₹2.5–4 per 1M input tokens, ~₹0.05–0.15/min
+> effective), matching cost-cutter-overhaul Phase C. Bulbul v3 remains flagged
+> beta-pricing = negotiation leverage. Sources: sarvam.ai/api-pricing,
+> docs.sarvam.ai/api/getting-started/pricing, speech.dev/models/sarvam-saaras-v3
+> (verified 2026-05-23).
+
 ---
 
 # 8. Research: Telephony Alternatives
