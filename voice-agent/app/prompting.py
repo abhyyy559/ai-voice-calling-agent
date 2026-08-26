@@ -26,9 +26,12 @@ DISCLOSURE_HEADER = (
 PERSONA_HEADER = "WHO YOU ARE - role and mission:"
 CONTEXT_HEADER = "COMPANY KNOWLEDGE - facts you may use; never invent anything beyond this:"
 CALLER_CONTEXT_HEADER = "CALLER CONTEXT - who this specific call is about:"
+LANGUAGE_HEADER = "LANGUAGE INSTRUCTION:"
 QUESTIONS_HEADER = "YOUR GOALS - information to collect during the call:"
 EXTRACTION_HEADER = "RECORDING ANSWERS - extraction discipline:"
 ESCALATION_HEADER = "WHEN TO WRAP UP:"
+
+LANGUAGE_NAMES = {"en": "English", "te": "Telugu", "hi": "Hindi"}
 
 
 def _disclosure_text(config: Mapping[str, Any]) -> str:
@@ -135,6 +138,29 @@ def render_system_prompt(
     # 3b. Caller context (P0-2) — who this specific call is about.
     if contact:
         sections.append(render_caller_context(contact))
+
+    # 3c. Language instruction — tells the LLM which language to respond in.
+    voice_settings = config.get("voice_settings") or {}
+    if isinstance(voice_settings, Mapping):
+        lang_code = str(voice_settings.get("language") or "en").lower()
+    else:
+        lang_code = "en"
+    lang_name = LANGUAGE_NAMES.get(lang_code, lang_code)
+    if lang_code != "en":
+        sections.append(
+            f"{LANGUAGE_HEADER}\n"
+            f"- The caller speaks {lang_name}. Respond entirely in {lang_name}.\n"
+            "- If the caller code-switches (mixes languages mid-sentence), "
+            f"follow their lead: reply in {lang_name} but accept words from any language.\n"
+            "- Keep the same extraction field names in English when calling tools."
+        )
+    else:
+        sections.append(
+            f"{LANGUAGE_HEADER}\n"
+            "- The primary language for this call is English.\n"
+            "- If the caller speaks another language, try to follow their lead "
+            "but default to English."
+        )
 
     # 4. Speaking style — this is what makes it sound human instead of IVR-like.
     sections.append(
