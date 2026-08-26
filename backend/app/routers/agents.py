@@ -223,7 +223,7 @@ def create_version(
             rule if isinstance(rule, str) else rule.model_dump()
             for rule in validated.escalation_rules
         ],
-        voice_settings=validated.voice_settings,
+        voice_settings=validated.voice_settings.model_dump(),
         created_by=user.id,
     )
     db.add(version)

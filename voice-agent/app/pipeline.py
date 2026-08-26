@@ -111,15 +111,18 @@ class ProviderBundle:
         return self.stt is not None and self.llm is not None and self.tts is not None
 
 
-def _voice_overrides(voice_settings: Optional[Mapping[str, Any]]) -> tuple[str, str]:
-    """Extract (llm_model, tts_voice_id) overrides saved with an agent version.
+def _voice_overrides(voice_settings: Optional[Mapping[str, Any]]) -> tuple[str, str, dict[str, str], str]:
+    """Extract (llm_model, tts_voice_id, voices_by_language, language) from saved settings.
 
-    Both fall back to empty strings, meaning "use the platform default".
+    Falls back to empty strings / empty dict / "en" for missing keys.
     """
     vs = voice_settings or {}
-    llm_model = str(vs.get("llm_model") or "").strip()
-    tts_voice = str(vs.get("tts_voice_id") or "").strip()
-    return llm_model, tts_voice
+    get = vs.get if isinstance(vs, Mapping) else (lambda k, d=None: getattr(vs, k, d))
+    llm_model = str(get("llm_model", "") or "").strip()
+    tts_voice = str(get("tts_voice_id", "") or "").strip()
+    vbl = dict(get("voices_by_language", {}) or {})
+    lang = str(get("language", "en") or "en").lower()
+    return llm_model, tts_voice, vbl, lang
 
 
 def build_providers(
@@ -133,15 +136,19 @@ def build_providers(
     defaults (GROQ_MODEL env / provider default voice).
     """
     bundle = ProviderBundle(stt=None, llm=None, tts=None)
-    model_override, tts_voice_override = _voice_overrides(voice_settings)
+    model_override, tts_voice_override, voices_by_lang, language = _voice_overrides(voice_settings)
+    effective_voice = voices_by_lang.get(language) or tts_voice_override
 
     if settings.deepgram_api_key:
+        stt_lang = str(
+            (voice_settings or {}).get("stt_language", "en")
+        ).strip().lower() or "en"
         # P0-1 endpointing tuning: the livekit-plugins-deepgram 1.7.0 kwarg is
         # ``endpointing_ms`` (introspected signature has NO ``endpointing``);
         # plugin default is a hair-trigger 25 ms which fragments speech.
         bundle.stt = deepgram.STT(
             model="nova-3",
-            language="en",
+            language=stt_lang,
             endpointing_ms=200,
             api_key=settings.deepgram_api_key,
         )
@@ -152,8 +159,8 @@ def build_providers(
 
     if settings.cartesia_api_key:
         tts_kwargs: dict[str, Any] = {}
-        if tts_voice_override:
-            tts_kwargs["voice"] = tts_voice_override
+        if effective_voice:
+            tts_kwargs["voice"] = effective_voice
         bundle.tts = cartesia.TTS(api_key=settings.cartesia_api_key, **tts_kwargs)
     else:
         bundle.problems.append("CARTESIA_API_KEY missing - text-to-speech disabled")

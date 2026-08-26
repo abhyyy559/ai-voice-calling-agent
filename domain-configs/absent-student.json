@@ -29,5 +29,7 @@
  "Thank you for the information. I have noted your response.",
  "I understand. Let me confirm: [Repeat extracted information].",
  "I am here to assist. Please provide your details again."
- ]
+ ],
+ "voice_settings": {"language": "en",
+  "voices_by_language": {"en": "", "te": ""}}
 }

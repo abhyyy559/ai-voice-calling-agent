@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any, Literal, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from datetime import date
 
 
@@ -36,6 +36,45 @@ class EscalationRule(BaseModel):
     action: Literal["transfer", "flag", "end_call"] = Field(
         default="transfer", description="Action to take on trigger"
     )
+
+
+ALLOWED_LANGUAGES = frozenset({"en", "te", "hi"})
+
+
+class VoiceSettings(BaseModel):
+    """Structured voice config per agent version.
+
+    Unknown keys pass through (extra="allow") so legacy consumers that
+    stored ``voice_id``, ``speed``, etc. are not broken.
+    """
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
+
+    language: str = Field(default="en")
+    tts_voice_id: str = Field(default="")
+    llm_model: str = Field(default="")
+    speaking_rate: float = Field(default=1.0, ge=0.5, le=2.0)
+    stt_language: str = Field(default="en")
+    voices_by_language: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("language", "stt_language")
+    @classmethod
+    def _known_language(cls, v: str) -> str:
+        v = v.lower()
+        if v not in ALLOWED_LANGUAGES:
+            raise ValueError(
+                f"unsupported language {v!r}; allowed: {sorted(ALLOWED_LANGUAGES)}"
+            )
+        return v
+
+    @field_validator("voices_by_language")
+    @classmethod
+    def _languages_known(cls, v: Dict[str, str]) -> Dict[str, str]:
+        bad = [k.lower() for k in v if k.lower() not in ALLOWED_LANGUAGES]
+        if bad:
+            raise ValueError(
+                f"unsupported languages in voices_by_language: {bad}"
+            )
+        return {k.lower(): val.strip() for k, val in v.items() if val.strip()}
 
 
 class DomainConfig(BaseModel):
@@ -115,7 +154,7 @@ class AgentVersionPayload(BaseModel):
     escalation_rules: List[Union[str, EscalationRule]] = Field(
         ..., min_length=1, description="Conditions that trigger human escalation"
     )
-    voice_settings: Dict[str, Any] = Field(default_factory=dict)
+    voice_settings: VoiceSettings = Field(default_factory=VoiceSettings)
 
     @field_validator("question_flow")
     @classmethod
