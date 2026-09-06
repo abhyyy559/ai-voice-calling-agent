@@ -2040,7 +2040,7 @@ In `frontend/src/pages/CampaignDetailPage.jsx`, near the Launch/Pause/Export hea
   </div>
   {dryRunError && <div className="banner banner-error">{dryRunError}</div>}
   <div className="form-actions">
-    <button className="btn primary" disabled={dryRunBusy} onClick={runDryRun}>
+    <button className="btn btn-primary" disabled={dryRunBusy} onClick={runDryRun}>
       {dryRunBusy ? 'Simulating…' : 'Run text dry-run'}
     </button>
   </div>
@@ -2086,6 +2086,310 @@ Then run the P1 acceptance probes from the spec §7 that are automatable: dry-ru
 ```bash
 git add frontend/src/components/DryRunReport.jsx frontend/src/pages/CampaignDetailPage.jsx docs/superpowers/evaluations/p2-exit-gates.md
 git commit -m "feat: campaign dry-run report UI and P2 exit-gate checklist"
+```
+
+---
+
+### Task 11: Text-path pseudo-tool-call handling + Groq 429 retry
+
+**Why:** live text-mode transcript showed the model emitting `<tool_call>` XML as *text* instead of a real function call — the raw markup was persisted to the transcript AND the extraction (`is_sick_leave`) was lost. The voice path already scrubs; the text path does not. Same transcript showed a Groq 429, which the dry-run runner will hit harder.
+
+**Files:**
+- Modify: `backend/app/routers/playground.py` (parse/scrub helpers, post-process in `_run_agent_turn`, retry in `_groq_chat`, top-level `import asyncio`)
+- Test: `backend/tests/test_text_robustness.py` (new)
+
+**Interfaces:**
+- Consumes: Task 7 (`_run_agent_turn`, `_execute_text_tool`).
+- Produces: `_parse_pseudo_tool_calls(text: str) -> list[dict[str, Any]]`; `_scrub_tool_markup(text: str) -> str` (module-private, imported by tests like the other helpers).
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+"""Text-path robustness: pseudo tool-call markup + Groq 429 retry."""
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.routers.playground as playground_module
+from conftest import auth_headers, register
+from test_playground_text import chat, create_groq_app, script, start_session
+
+
+def test_parse_and_scrub_pseudo_tool_call() -> None:
+    from app.routers.playground import _parse_pseudo_tool_calls, _scrub_tool_markup
+
+    text = (
+        "ok <tool_call>\n<function=record_extracted_field>\n<parameter=confidence>\n0.95\n</parameter>\n"
+        "<parameter=field_name>\nis_sick_leave\n</parameter>\n<parameter=value>\nyes\n</parameter>\n"
+        "</function>\n</tool_call> done"
+    )
+    calls = _parse_pseudo_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "record_extracted_field"
+    assert calls[0]["arguments"] == {"confidence": "0.95", "field_name": "is_sick_leave", "value": "yes"}
+    assert _scrub_tool_markup(text) == "ok done"
+
+
+def test_pseudo_tool_call_recorded_and_scrubbed(groq_client, session_factory):
+    from sqlalchemy import select
+
+    from app.models import ExtractedField, Transcript
+    from test_playground_text import tool_call as _unused  # noqa: F401 (keeps import style)
+
+    client = groq_client
+    token, _ = register(client)
+    call_id = start_session(client, token)
+    pseudo = (
+        "<tool_call>\n<function=record_extracted_field>\n<parameter=confidence>\n0.95\n</parameter>\n"
+        "<parameter=field_name>\nis_sick_leave\n</parameter>\n<parameter=value>\nyes\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    script(chat(pseudo))
+    resp = client.post(
+        f"/api/playground/sessions/{call_id}/turns",
+        json={"text": "He is sick."},
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["extracted_fields"] == [
+        {"field_name": "is_sick_leave", "field_value": "yes", "confidence": 0.95}
+    ]
+    assert "<tool_call>" not in body["reply_text"]
+    with session_factory() as db:
+        fields = db.scalars(
+            select(ExtractedField).where(ExtractedField.call_id == call_id)
+        ).all()
+        assert [(f.field_name, f.field_value) for f in fields] == [("is_sick_leave", "yes")]
+        texts = [
+            t.text
+            for t in db.scalars(
+                select(Transcript).where(Transcript.call_id == call_id).order_by(Transcript.turn_index)
+            ).all()
+        ]
+        assert all("<tool_call>" not in t for t in texts)
+
+
+def test_pseudo_tool_call_mixed_text_kept(groq_client):
+    client = groq_client
+    token, _ = register(client)
+    call_id = start_session(client, token)
+    pseudo = (
+        "Noted. <tool_call>\n<function=record_extracted_field>\n<parameter=confidence>\n0.9\n</parameter>\n"
+        "<parameter=field_name>\nreason_for_absence\n</parameter>\n<parameter=value>\nfever\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    script(chat(pseudo))
+    resp = client.post(
+        f"/api/playground/sessions/{call_id}/turns",
+        json={"text": "He has fever."},
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["reply_text"] == "Noted."
+    assert resp.json()["extracted_fields"][0]["field_name"] == "reason_for_absence"
+```
+
+(`groq_client`, `script`, `chat`, `start_session` are imported from `test_playground_text` — same directory, importable. Drop the silly `_unused` import line above — do NOT include it; import only what is used: `chat, create_groq_app` is not needed either unless the 429 tests use it. Keep imports minimal per test: the file imports `chat, groq_client, script, start_session` from `test_playground_text` where needed.)
+
+429 tests with a dedicated flaky fake (the shared `_FakeAsyncClient` only returns 200):
+
+```python
+class _FlakyResponse:
+    def __init__(self, status_code: int, payload: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.headers = headers or {}
+        self.text = "rate limited" if status_code == 429 else ""
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _FlakyAsyncClient:
+    planned: list[_FlakyResponse] = []
+    requests: list[dict[str, Any]] = []
+
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    async def __aenter__(self) -> "_FlakyAsyncClient":
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> bool:
+        return False
+
+    async def post(self, url: str | None = None, json: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> _FlakyResponse:
+        _FlakyAsyncClient.requests.append({"url": url, "json": json, "headers": headers})
+        assert _FlakyAsyncClient.planned, "no planned response left"
+        return _FlakyAsyncClient.planned.pop(0)
+
+
+@pytest.fixture()
+def flaky_client(session_factory, monkeypatch):  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(playground_module.httpx, "AsyncClient", _FlakyAsyncClient)
+    _FlakyAsyncClient.planned = []
+    _FlakyAsyncClient.requests = []
+    fresh = create_groq_app(session_factory)
+    with TestClient(fresh) as test_client:
+        yield test_client
+    _FlakyAsyncClient.planned = []
+    _FlakyAsyncClient.requests = []
+
+
+def test_groq_429_retries_then_succeeds(flaky_client):
+    from test_playground_text import start_session as _start
+
+    client = flaky_client
+    token, _ = register(client)
+    call_id = _start(client, token)
+    _FlakyAsyncClient.planned = [
+        _FlakyResponse(429, headers={"retry-after": "0"}),
+        _FlakyResponse(200, {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}),
+    ]
+    _FlakyAsyncClient.requests = []
+    resp = client.post(
+        f"/api/playground/sessions/{call_id}/turns",
+        json={"text": "hi"},
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["reply_text"] == "hi"
+    assert len(_FlakyAsyncClient.requests) == 2
+
+
+def test_groq_persistent_429_raises_after_retries(flaky_client):
+    from test_playground_text import start_session as _start
+
+    client = flaky_client
+    token, _ = register(client)
+    call_id = _start(client, token)
+    _FlakyAsyncClient.planned = [_FlakyResponse(429, headers={"retry-after": "0"})] * 3
+    _FlakyAsyncClient.requests = []
+    resp = client.post(
+        f"/api/playground/sessions/{call_id}/turns",
+        json={"text": "hi"},
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 429
+    assert len(_FlakyAsyncClient.requests) == 3  # initial + 2 retries
+```
+
+(`create_groq_app` is imported from `test_playground_text`. `retry-after: "0"` keeps the test fast with no sleep patching.)
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run (workdir `backend/`): `.\.venv\Scripts\python.exe -m pytest tests/test_text_robustness.py -q`
+Expected: FAIL with `ImportError` (`_parse_pseudo_tool_calls` does not exist).
+
+- [ ] **Step 3: Write minimal implementation**
+
+(a) Insert helpers + regexes immediately before the `create_turn` endpoint in `backend/app/routers/playground.py`:
+
+```python
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL | re.IGNORECASE)
+_FUNCTION_RE = re.compile(r"<function\s*=\s*([^>\s]+)\s*>", re.IGNORECASE)
+_PARAMETER_RE = re.compile(r"<parameter\s*=\s*([^>\s]+)\s*>\s*(.*?)\s*</parameter>", re.DOTALL | re.IGNORECASE)
+_TAG_REMAINDER_RE = re.compile(r"</?(?:function|parameter)[^>]*>", re.IGNORECASE)
+
+
+def _parse_pseudo_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Tool calls the model emitted as text instead of real function calls.
+
+    Returns [{name, arguments}]. Only ``record_extracted_field`` is actionable;
+    anything else is scrubbed but ignored (never terminate a call on echoed text).
+    """
+    found: list[dict[str, Any]] = []
+    for block in _TOOL_CALL_BLOCK_RE.findall(str(text or "")):
+        func = _FUNCTION_RE.search(block)
+        if not func:
+            continue
+        args: dict[str, Any] = {}
+        for key, value in _PARAMETER_RE.findall(block):
+            args[key.strip()] = value.strip()
+        found.append({"name": func.group(1).strip(), "arguments": args})
+    return found
+
+
+def _scrub_tool_markup(text: str) -> str:
+    """Remove tool-call markup so it never ships to the transcript/UI."""
+    out = _TOOL_CALL_BLOCK_RE.sub(" ", str(text or ""))
+    out = _TAG_REMAINDER_RE.sub(" ", out)
+    return " ".join(out.split())
+```
+
+(`re` is already imported in playground.py — verify at edit time.)
+
+(b) Post-process in `_run_agent_turn`: insert after the for/else round loop (after the `else:` forced-reply block), before the `elapsed_ms = round(...)` line:
+
+```python
+    # Pseudo tool calls: the model sometimes emits <tool_call> XML as text
+    # instead of a real function call (seen live: the field was lost and raw
+    # markup was saved to the transcript). Execute record_* ones with identical
+    # semantics, then scrub all markup so it never ships to the UI.
+    for pseudo in _parse_pseudo_tool_calls(assistant_text):
+        if pseudo["name"] != "record_extracted_field":
+            continue
+        _result_text, field_record, _done_flag = _execute_text_tool(
+            db, call, pseudo["name"], pseudo["arguments"], next_index
+        )
+        if field_record and "summary" not in field_record:
+            extracted_now.append(field_record)
+    assistant_text = _scrub_tool_markup(assistant_text)
+```
+
+(c) Retry in `_groq_chat`: add module constants + delay helper near `_GROQ_BASE_URL`:
+
+```python
+_GROQ_MAX_RETRIES = 2
+_GROQ_RETRY_DELAYS = (2.0, 5.0)
+
+
+def _retry_delay(response: Any, attempt: int) -> float:
+    """Backoff for a 429: honor Retry-After, else 2s then 5s."""
+    try:
+        header = response.headers.get("retry-after")
+        if header is not None:
+            return max(0.0, float(header))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    if 0 <= attempt < len(_GROQ_RETRY_DELAYS):
+        return _GROQ_RETRY_DELAYS[attempt]
+    return _GROQ_RETRY_DELAYS[-1]
+```
+
+Replace the single-post block in `_groq_chat`:
+
+```python
+    headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
+    async with httpx.AsyncClient(base_url=_GROQ_BASE_URL, timeout=45.0) as client:
+        response = None
+        for attempt in range(_GROQ_MAX_RETRIES + 1):
+            response = await client.post("/chat/completions", json=body, headers=headers)
+            if response.status_code != 429:
+                break
+            if attempt >= _GROQ_MAX_RETRIES:
+                break
+            logger.warning("Groq chat rate limited (429, attempt %s): backing off", attempt + 1)
+            await asyncio.sleep(_retry_delay(response, attempt))
+    assert response is not None  # loop always runs at least once
+```
+
+Keep the existing post-loop handling (`if response.status_code == 429: warn + raise 429 HTTPException`, `!= 200` → 502) byte-identical. Add top-level `import asyncio` (a function-local import exists elsewhere in the file; top-level is still correct — verify no name clash at edit time).
+
+- [ ] **Step 4: Run tests to verify they pass, plus the text-mode suites**
+
+Run (workdir `backend/`): `.\.venv\Scripts\python.exe -m pytest tests/test_text_robustness.py tests/test_playground_text.py tests/test_dry_run.py -q`
+Expected: all pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/routers/playground.py backend/tests/test_text_robustness.py
+git commit -m "feat: handle pseudo tool-call markup and retry Groq 429s in text mode"
 ```
 
 ---
