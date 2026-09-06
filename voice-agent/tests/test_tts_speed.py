@@ -66,3 +66,32 @@ def test_build_providers_omits_speed_at_normal_rate(monkeypatch) -> None:
 
     build_providers(_settings(), {})
     assert "speed" not in _RecorderTTS.last_kwargs
+
+
+def test_build_providers_env_pronunciation_dict(monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_module.deepgram, "STT", lambda **kw: object())
+    monkeypatch.setattr(pipeline_module.cartesia, "TTS", _RecorderTTS)
+
+    build_providers(
+        _settings(cartesia_pronunciation_dict_id="pdict_env123"), {}
+    )
+    assert _RecorderTTS.last_kwargs["pronunciation_dict_id"] == "pdict_env123"
+
+
+def test_build_providers_agent_dict_overrides_env(monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_module.deepgram, "STT", lambda **kw: object())
+    monkeypatch.setattr(pipeline_module.cartesia, "TTS", _RecorderTTS)
+
+    build_providers(
+        _settings(cartesia_pronunciation_dict_id="pdict_env123"),
+        {"pronunciation_dict_id": "pdict_agent456"},
+    )
+    assert _RecorderTTS.last_kwargs["pronunciation_dict_id"] == "pdict_agent456"
+
+
+def test_build_providers_omits_dict_when_unset(monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_module.deepgram, "STT", lambda **kw: object())
+    monkeypatch.setattr(pipeline_module.cartesia, "TTS", _RecorderTTS)
+
+    build_providers(_settings(), {})
+    assert "pronunciation_dict_id" not in _RecorderTTS.last_kwargs

@@ -183,6 +183,12 @@ def build_providers(
         speed = _cartesia_speed((voice_settings or {}).get("speaking_rate", 1.0))
         if speed is not None:
             tts_kwargs["speed"] = speed
+        # Custom pronunciations (e.g. Indian names): per-agent voice setting
+        # wins, platform env default applies to every agent without one.
+        pron_dict = str((voice_settings or {}).get("pronunciation_dict_id", "") or "").strip()
+        pron_dict = pron_dict or str(settings.cartesia_pronunciation_dict_id or "").strip()
+        if pron_dict:
+            tts_kwargs["pronunciation_dict_id"] = pron_dict
         bundle.tts = cartesia.TTS(api_key=settings.cartesia_api_key, **tts_kwargs)
     else:
         bundle.problems.append("CARTESIA_API_KEY missing - text-to-speech disabled")

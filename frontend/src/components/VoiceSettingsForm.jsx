@@ -15,7 +15,7 @@ export const VOICE_PRESETS = [
   {
     id: '',
     name: 'Platform default',
-    detail: 'Let VocalIQ pick a clear natural voice',
+    detail: 'Let Echo Sarathi pick a clear natural voice',
   },
   {
     id: 'f786b574-daa5-4673-aa0c-cbe3e8534c02',
@@ -183,6 +183,20 @@ export default function VoiceSettingsForm({ value, onChange, error }) {
       </div>
 
       <div className="field">
+        <label htmlFor="vs-prondict">Pronunciation dictionary ID (optional)</label>
+        <input
+          id="vs-prondict"
+          type="text"
+          value={settings.pronunciation_dict_id || ''}
+          placeholder="e.g. pdict_123abc"
+          onChange={(e) => update({ pronunciation_dict_id: e.target.value })}
+        />
+        <p className="hint">
+          Cartesia dictionary for hard-to-pronounce names. Leave blank to use the platform default, if configured.
+        </p>
+      </div>
+
+      <div className="field">
         <label htmlFor="vs-lang">Speech recognition language</label>
         <select
           id="vs-lang"
@@ -211,6 +225,8 @@ export function normalizeVoiceSettings(value) {
   };
   const voice = String(s.tts_voice_id || '').trim();
   if (voice && voice !== '__custom__') out.tts_voice_id = voice;
+  const pron = String(s.pronunciation_dict_id || '').trim();
+  if (pron) out.pronunciation_dict_id = pron;
   const model = String(s.llm_model || '').trim();
   if (model) out.llm_model = model;
   return out;

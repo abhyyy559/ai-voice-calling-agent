@@ -59,6 +59,7 @@ class Settings:
     groq_model: str
     openai_model: str
     log_level: str
+    cartesia_pronunciation_dict_id: Optional[str] = None
 
     @staticmethod
     def from_env() -> "Settings":
@@ -69,6 +70,7 @@ class Settings:
             livekit_api_secret=os.getenv("LIVEKIT_API_SECRET", "secret"),
             deepgram_api_key=_get("DEEPGRAM_API_KEY"),
             cartesia_api_key=_get("CARTESIA_API_KEY"),
+            cartesia_pronunciation_dict_id=_get("CARTESIA_PRONUNCIATION_DICT_ID"),
             groq_api_key=_get("GROQ_API_KEY"),
             openai_api_key=_get("OPENAI_API_KEY"),
             openai_base_url=_get("OPENAI_BASE_URL"),
