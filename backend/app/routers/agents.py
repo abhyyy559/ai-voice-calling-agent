@@ -10,6 +10,8 @@ Tenancy: every query is filtered by the caller's org; foreign ids return 404.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +28,12 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 # Versions are also reachable directly by id (voice-agent + frontend use this).
 agent_versions_router = APIRouter(prefix="/api/agent-versions", tags=["agents"])
+
+# Role presets ("default prompts"): ready-made agent configs users pick in the
+# builder and edit. Kept as versioned JSON files next to the domain configs so
+# they are data, not code (CLAUDE.md convention).
+# agents.py lives at backend/app/routers/ -> parents[3] is the project root.
+PRESETS_DIR = Path(__file__).resolve().parents[3] / "domain-configs" / "presets"
 
 
 # --- request/response schemas ---------------------------------------------------
@@ -66,6 +74,53 @@ class AgentVersionOut(BaseModel):
     voice_settings: dict[str, Any]
     created_by: Optional[int] = None
     created_at: Optional[Any] = None
+
+
+# --- role presets ("default prompts") -------------------------------------------
+
+
+class PresetOut(BaseModel):
+    preset_id: str
+    name: str
+    description: str
+    version_payload: dict[str, Any]
+
+
+@router.get("/presets", response_model=list[PresetOut])
+def list_presets(user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+    """Ready-made role presets ("default prompts") for the agent builder.
+
+    Each preset is a complete, validated AgentVersion payload, so the frontend
+    can prefill the entire builder from one object. Route ordering matters:
+    FastAPI matches this literal path before ``/{agent_id}`` routes below.
+    """
+    presets: list[dict[str, Any]] = []
+    if PRESETS_DIR.is_dir():
+        for path in sorted(PRESETS_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                # Validate the embedded payload so a broken preset file fails
+                # loudly here instead of breaking the builder at save time.
+                validate_agent_version_payload(data.get("version_payload") or {})
+            except Exception as exc:  # noqa: BLE001 - skip malformed, don't 500
+                presets.append(
+                    {
+                        "preset_id": path.stem,
+                        "name": path.stem,
+                        "description": f"preset unavailable: {exc}",
+                        "version_payload": {},
+                    }
+                )
+                continue
+            presets.append(
+                {
+                    "preset_id": data.get("preset_id") or path.stem,
+                    "name": data.get("name") or path.stem,
+                    "description": data.get("description") or "",
+                    "version_payload": data.get("version_payload") or {},
+                }
+            )
+    return presets
 
 
 def _agent_out(agent: Agent) -> dict[str, Any]:

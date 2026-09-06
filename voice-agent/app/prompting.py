@@ -24,6 +24,9 @@ DISCLOSURE_HEADER = (
     "MANDATORY DISCLOSURE - your VERY FIRST utterance, spoken word-for-word:"
 )
 PERSONA_HEADER = "WHO YOU ARE - role and mission:"
+ROLE_MISSION_HEADER = (
+    "ROLE & MISSION - defined by the agent creator (AUTHORITATIVE):"
+)
 CONTEXT_HEADER = "COMPANY KNOWLEDGE - facts you may use; never invent anything beyond this:"
 CALLER_CONTEXT_HEADER = "CALLER CONTEXT - who this specific call is about:"
 LANGUAGE_HEADER = "LANGUAGE INSTRUCTION:"
@@ -68,12 +71,24 @@ def render_caller_context(contact: Mapping[str, Any]) -> str:
     about: list[str] = []
     student = fields.get("student_name") or ""
     parent = fields.get("parent_name") or ""
+    # Domain-generic subject keys: whichever of these is present marks the
+    # person the call is about (lead verification, surveys, appointments, ...).
+    subject = (
+        fields.get("full_name")
+        or fields.get("contact_name")
+        or fields.get("lead_name")
+        or fields.get("candidate_name")
+        or fields.get("name")
+        or ""
+    )
     if student:
         about.append(f"the student {student}")
     if fields.get("class_section"):
         about.append(f"class {fields['class_section']}")
     if fields.get("absent_date"):
         about.append(f"absent on {fields['absent_date']}")
+    if subject:
+        about.append(f"the person {subject}")
     if about:
         lines.append("- You are calling about " + ", ".join(about) + ".")
     else:
@@ -81,14 +96,90 @@ def render_caller_context(contact: Mapping[str, Any]) -> str:
             "- Details of the person this call is about: "
             + json.dumps(fields, ensure_ascii=False, sort_keys=True)
         )
+
+    # Any other custom fields still get through - the creator's contact card
+    # may carry domain-specific facts (city, form_source, account_id, ...) the
+    # agent should be able to use without the platform knowing their meaning.
+    woven = {
+        "student_name",
+        "class_section",
+        "absent_date",
+        "full_name",
+        "contact_name",
+        "lead_name",
+        "candidate_name",
+        "name",
+        "parent_name",
+        "contact_person",
+    }
+    extras = {k: v for k, v in fields.items() if k not in woven}
+    if extras and about:
+        lines.append(
+            "- Other details you may use if relevant: "
+            + json.dumps(extras, ensure_ascii=False, sort_keys=True)
+        )
+
+    # Who to ask for: an explicit parent (school flows) or contact person wins;
+    # otherwise the subject themself (e.g. a lead answering their own phone).
+    verify_target = (
+        parent
+        or fields.get("contact_person")
+        or (subject and f"{subject} (the person you are calling)")
+        or "the person you are calling"
+    )
     if parent:
         lines.append(f"- Ask to speak with {parent} (the parent/guardian).")
-    verify_target = parent if parent else "the parent/guardian"
+    elif subject:
+        lines.append(f"- Ask for {subject} when the call is answered.")
+
+    # Say the names out loud. The #1 complaint from real test calls is a generic
+    # opening ("may I speak with the parent or guardian...") when the caller's
+    # name is sitting right there in the contact card. Collect every name we
+    # know and instruct the agent to use them in the greeting. Prefer the plain
+    # name over the label so the greeting sounds natural ("Suresh", not
+    # "Suresh (the parent/guardian)").
+    known_names: list[str] = []
+    for key in ("parent_name", "student_name", "full_name", "lead_name",
+                "contact_name", "candidate_name", "name", "contact_person"):
+        val = str(fields.get(key) or "").strip()
+        if val and val not in known_names:
+            known_names.append(val)
+    if known_names:
+        examples = []
+        if parent and student:
+            examples.append(f"Good morning, am I speaking with {parent}, parent or guardian of {student}?")
+        elif parent:
+            examples.append(f"Good morning, am I speaking with {parent}?")
+        elif subject:
+            examples.append(f"Good morning, am I speaking with {subject}?")
+        named = ", ".join(known_names)
+        lines.append(
+            "- SAY THE NAMES OUT LOUD: greet the person using their name. "
+            f"Known name(s) on this record: {named}."
+        )
+        if examples:
+            lines.append(
+                "- Example openings to model: "
+                + " | ".join(examples)
+            )
+        if parent or student:
+            lines.append(
+                "- NEVER say 'the person we are calling about' or 'the parent or "
+                "guardian of the student' when you have a real name on this record. "
+                "Names make the call feel human; vagueness is how callers sense a bot."
+            )
+        else:
+            lines.append(
+                "- NEVER say 'the person we are calling about' when you have a real "
+                "name on this record. Names make the call feel human; vagueness is "
+                "how callers sense a bot."
+            )
     lines.extend(
         [
             (
                 "- VERIFY RELATIONSHIP BEFORE DETAILS: confirm you are speaking with "
-                f"{verify_target} before discussing any details about the student."
+                f"{verify_target} before discussing any details about the person "
+                "this call is about."
             ),
             (
                 "- If the person who answered is NOT "
@@ -116,16 +207,28 @@ def render_system_prompt(
     if disclosure:
         sections.append(f"{DISCLOSURE_HEADER}\n{disclosure}")
 
-    # 2. Role & mission.
+    # 2. Role & mission — platform baseline, then the creator's definition.
     system_prompt = str(config.get("system_prompt") or "").strip()
     role_lines: list[str] = [
-        "You are a friendly human-sounding phone agent making a single outbound call.",
+        "You are a human-sounding phone agent making a single outbound call.",
         "This is a real-time SPOKEN conversation: the caller hears your words read aloud by a voice engine.",
         "Your job is to have a natural short conversation, understand the caller, and complete the goals below.",
     ]
-    if system_prompt:
-        role_lines.append(f"Agent-specific role from the creator: {system_prompt}")
     sections.append("\n".join([PERSONA_HEADER] + [f"- {line}" for line in role_lines]))
+
+    # 2b. Creator's role definition - the PRIMARY identity instruction.
+    # Rendered verbatim as its own block (NOT a bullet inside the generic
+    # persona) so a well-written prompt fully defines who the agent is, why it
+    # is calling, and how it communicates. The platform guardrails further
+    # below still apply; this block only wins on role/behavior specifics.
+    if system_prompt:
+        sections.append(
+            f"{ROLE_MISSION_HEADER}\n"
+            f"{system_prompt}\n"
+            "This role definition is authoritative for WHO you are and HOW you "
+            "behave in this call: where it differs from generic examples in "
+            "these instructions, follow the role definition."
+        )
 
     # 3. Company context.
     company_context = config.get("company_context")
@@ -186,7 +289,7 @@ def render_system_prompt(
         "- STAY ON TOPIC: you only discuss the purpose of this call defined above. "
         "If asked anything unrelated (news, general knowledge, personal opinions), "
         "politely decline: 'I can only help with <purpose> today' and steer back.\n"
-        "- PRIVACY: never share any information about OTHER students, callers or records. "
+        "- PRIVACY: never share any information about any OTHER person, caller, or record. "
         "Only discuss the specific person this call is about.\n"
         "- VERIFY BEFORE SHARING: if the relationship of the person answering is unclear "
         "for a sensitive topic, confirm who you are speaking with first.\n"

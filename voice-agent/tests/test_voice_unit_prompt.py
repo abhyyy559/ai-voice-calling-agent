@@ -79,6 +79,48 @@ def test_escalation_and_never_fabricate_text_present() -> None:
     assert "flag" in lowered  # flagged wrap-up requirement
 
 
+# ---------------------------------------------------------------------------
+# Creator role definition (prompt-driven agents): the user's system_prompt is
+# the authoritative ROLE & MISSION block, rendered verbatim - not a bullet.
+# ---------------------------------------------------------------------------
+LEAD_VERIFICATION_PROMPT = (
+    "# ROLE\n"
+    "You are a lead verification agent for EduPro Learning. You call people "
+    "who filled the 'Free Demo Class' form on our website.\n"
+    "# OBJECTIVE\n"
+    "Confirm they are interested in the demo class, verify the details they "
+    "submitted (name, city, preferred timing), and flag genuine interest for "
+    "the sales team.\n"
+    "# DO NOT\n"
+    "- Never offer discounts or promise placements.\n"
+    "- If they say they did not fill any form, apologise and end the call."
+)
+
+
+def test_creator_prompt_rendered_verbatim_as_own_block() -> None:
+    config = dict(BASE_CONFIG)
+    config["system_prompt"] = LEAD_VERIFICATION_PROMPT
+
+    rendered = render_system_prompt(config)
+
+    # Own block with its own header, not a "- Agent-specific role ..." bullet.
+    assert "ROLE & MISSION - defined by the agent creator" in rendered
+    assert "Agent-specific role from the creator" not in rendered
+    # Verbatim, multi-line, including the section markers the author wrote.
+    assert LEAD_VERIFICATION_PROMPT in rendered
+    # Authoritative precedence is stated once for the model.
+    assert "authoritative" in rendered.lower()
+
+
+def test_creator_prompt_absent_means_no_role_block() -> None:
+    config = dict(BASE_CONFIG)
+    config["system_prompt"] = ""
+
+    rendered = render_system_prompt(config)
+
+    assert "ROLE & MISSION - defined by the agent creator" not in rendered
+
+
 def test_required_fields_marked_in_schema_block() -> None:
     rendered = render_system_prompt(BASE_CONFIG)
     schema_block = rendered[rendered.index(EXTRACTION_HEADER):]

@@ -43,6 +43,54 @@ def _create_agent(client: Any, token: str, name: str | None = None) -> dict[str,
     return resp.json()
 
 
+# --- role presets ("default prompts") --------------------------------------------
+
+
+def test_list_presets_returns_valid_payloads(client):
+    token, _user = register(client)
+    resp = client.get("/api/agents/presets", headers=auth_headers(token))
+    assert resp.status_code == 200, resp.text
+    presets = resp.json()
+    ids = {p["preset_id"] for p in presets}
+    # The four shipped role presets are present.
+    assert {"lead-verification", "appointment-confirmation", "feedback-survey",
+            "absent-student-followup"} <= ids
+    for preset in presets:
+        assert preset["name"]
+        payload = preset["version_payload"]
+        # Each preset is a complete, saveable AgentVersion payload.
+        assert payload["system_prompt"]
+        assert payload["question_flow"]
+        assert payload["extraction_schema"]
+        assert payload["disclosure_script"]
+        assert payload["escalation_rules"]
+
+
+def test_preset_payload_saves_as_agent_version(client):
+    """End-to-end contract: pick a preset, create an agent, save it as v1."""
+    token, _user = register(client)
+    presets = client.get(
+        "/api/agents/presets", headers=auth_headers(token)
+    ).json()
+    lead = next(p for p in presets if p["preset_id"] == "lead-verification")
+
+    agent = _create_agent(client, token, name="My Lead Verifier")
+    resp = client.post(
+        f"/api/agents/{agent['id']}/versions",
+        json=lead["version_payload"],
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["version"] == 1
+    assert "lead verification agent" in body["system_prompt"]
+
+
+def test_list_presets_requires_auth(client):
+    assert client.get("/api/agents/presets").status_code in (401, 403)
+
+
+# --- agent CRUD ----------------------------------------------------------------
 # --- agent CRUD ----------------------------------------------------------------
 
 
