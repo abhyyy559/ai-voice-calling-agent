@@ -12,8 +12,10 @@ two services are deliberately decoupled.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import timedelta
@@ -43,6 +45,21 @@ _LATENCY_METRICS = ("stt_final_ms", "llm_first_token_ms", "tts_first_audio_ms", 
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 # Tool-call rounds per user turn before we force a plain-text reply.
 _MAX_TOOL_ROUNDS = 3
+_GROQ_MAX_RETRIES = 2
+_GROQ_RETRY_DELAYS = (2.0, 5.0)
+
+
+def _retry_delay(response: Any, attempt: int) -> float:
+    """Backoff for a 429: honor Retry-After, else 2s then 5s."""
+    try:
+        header = response.headers.get("retry-after")
+        if header is not None:
+            return max(0.0, float(header))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    if 0 <= attempt < len(_GROQ_RETRY_DELAYS):
+        return _GROQ_RETRY_DELAYS[attempt]
+    return _GROQ_RETRY_DELAYS[-1]
 
 
 class SessionCreate(BaseModel):
@@ -574,7 +591,16 @@ async def _groq_chat(
         body.pop("tool_choice", None)
     headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
     async with httpx.AsyncClient(base_url=_GROQ_BASE_URL, timeout=45.0) as client:
-        response = await client.post("/chat/completions", json=body, headers=headers)
+        response = None
+        for attempt in range(_GROQ_MAX_RETRIES + 1):
+            response = await client.post("/chat/completions", json=body, headers=headers)
+            if response.status_code != 429:
+                break
+            if attempt >= _GROQ_MAX_RETRIES:
+                break
+            logger.warning("Groq chat rate limited (429, attempt %s): backing off", attempt + 1)
+            await asyncio.sleep(_retry_delay(response, attempt))
+    assert response is not None  # loop always runs at least once
     if response.status_code == 429:
         logger.warning("Groq chat rate limited (429): %s", response.text[:300])
         raise HTTPException(
@@ -644,6 +670,37 @@ def _execute_text_tool(
         return "call ended", {"summary": summary}, True
 
     return f"error: unknown tool {name}", None, False
+
+
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL | re.IGNORECASE)
+_FUNCTION_RE = re.compile(r"<function\s*=\s*([^>\s]+)\s*>", re.IGNORECASE)
+_PARAMETER_RE = re.compile(r"<parameter\s*=\s*([^>\s]+)\s*>\s*(.*?)\s*</parameter>", re.DOTALL | re.IGNORECASE)
+_TAG_REMAINDER_RE = re.compile(r"</?(?:function|parameter)[^>]*>", re.IGNORECASE)
+
+
+def _parse_pseudo_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Tool calls the model emitted as text instead of real function calls.
+
+    Returns [{name, arguments}]. Only ``record_extracted_field`` is actionable;
+    anything else is scrubbed but ignored (never terminate a call on echoed text).
+    """
+    found: list[dict[str, Any]] = []
+    for block in _TOOL_CALL_BLOCK_RE.findall(str(text or "")):
+        func = _FUNCTION_RE.search(block)
+        if not func:
+            continue
+        args: dict[str, Any] = {}
+        for key, value in _PARAMETER_RE.findall(block):
+            args[key.strip()] = value.strip()
+        found.append({"name": func.group(1).strip(), "arguments": args})
+    return found
+
+
+def _scrub_tool_markup(text: str) -> str:
+    """Remove tool-call markup so it never ships to the transcript/UI."""
+    out = _TOOL_CALL_BLOCK_RE.sub(" ", str(text or ""))
+    out = _TAG_REMAINDER_RE.sub(" ", out)
+    return " ".join(out.split())
 
 
 @router.post("/sessions/{call_id}/turns")
@@ -779,6 +836,20 @@ async def _run_agent_turn(
             include_tools=False,
         )
         assistant_text = str(message.get("content") or "").strip()
+
+    # Pseudo tool calls: the model sometimes emits <tool_call> XML as text
+    # instead of a real function call (seen live: the field was lost and raw
+    # markup was saved to the transcript). Execute record_* ones with identical
+    # semantics, then scrub all markup so it never ships to the UI.
+    for pseudo in _parse_pseudo_tool_calls(assistant_text):
+        if pseudo["name"] != "record_extracted_field":
+            continue
+        _result_text, field_record, _done_flag = _execute_text_tool(
+            db, call, pseudo["name"], pseudo["arguments"], next_index
+        )
+        if field_record and "summary" not in field_record:
+            extracted_now.append(field_record)
+    assistant_text = _scrub_tool_markup(assistant_text)
 
     elapsed_ms = round((time.monotonic() - started_mono) * 1000.0)
 
