@@ -15,7 +15,11 @@ unit tested offline. The rendered prompt is structured, in order:
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any, Mapping, Optional
+
+logger = logging.getLogger("voice_agent.prompting")
 
 LOW_CONFIDENCE_THRESHOLD: float = 0.6
 MAX_ASKS_PER_FIELD: int = 3
@@ -35,6 +39,163 @@ EXTRACTION_HEADER = "RECORDING ANSWERS - extraction discipline:"
 ESCALATION_HEADER = "WHEN TO WRAP UP:"
 
 LANGUAGE_NAMES = {"en": "English", "te": "Telugu", "hi": "Hindi"}
+
+#: Bracket placeholder tokens that may appear verbatim in config strings and
+#: must never be spoken/shipped. Mapped to real values; empty values are removed.
+KNOWN_TOKENS: tuple[str, ...] = (
+    "[Institution Name]",
+    "[Company Name]",
+    "[Student Name]",
+    "[Lead Name]",
+    "[Parent/Guardian Name]",
+    "[Agent Name]",
+    "[Expected Return Date]",
+)
+
+_BRACKET_ARTIFACT_RE = re.compile(r"\[[^\]]*\]")
+_DOUBLE_SPACE_RE = re.compile(r"\s{2,}")
+
+_TOOL_BLOCK_RE = re.compile(
+    r"<tool_call>.*?</tool_call>|<function=[^>]*>|<parameter=[^>]*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_TOOL_CALLS_JSON_RE = re.compile(r'"[^"]*tool_calls[^"]*"\s*:\s*\[.*?\]', re.DOTALL)
+
+
+def scrub_speech_text(text: str) -> str:
+    """Remove LLM tool-call markup from text that will be spoken/saved.
+
+    Handles LiveKit-style inline markup (``<tool_call>...``, ``<function=...>``,
+    ``<parameter=...>``) and OpenAI-style ``\"tool_calls\": [...]`` JSON that a
+    model may emit as inline assistant text. Returns cleaned, stripped text.
+    """
+    original = str(text or "")
+    out = _TOOL_BLOCK_RE.sub(" ", original)
+    out = _TOOL_CALLS_JSON_RE.sub(" ", out)
+    out = _DOUBLE_SPACE_RE.sub(" ", out).strip()
+    if out != original.strip():
+        logger.debug("Scrubbed tool-call markup from agent text")
+    return out
+
+
+def apply_token_substitution(
+    text: str, tokens: Optional[Mapping[str, str]] = None
+) -> str:
+    """Replace known bracket tokens with real values; empty -> removed.
+
+    After substitution, any remaining ``[...]`` placeholder is stripped so a
+    bare bracket never ships. Returns cleaned text.
+    """
+    if not text:
+        return text
+    out = str(text)
+    for token, value in (tokens or {}).items():
+        out = out.replace(str(token), str(value) if value is not None else "")
+    # Safety net: strip any remaining placeholder tokens.
+    out = _BRACKET_ARTIFACT_RE.sub("", out)
+    return _DOUBLE_SPACE_RE.sub(" ", out).strip()
+
+
+def _first_name(*candidates: Optional[Mapping[str, Any]]) -> str:
+    """First known name found across contact cards (student/name/contact_name...)."""
+    for card in candidates:
+        if not isinstance(card, Mapping):
+            continue
+        for key in ("student_name", "name", "contact_name", "full_name", "lead_name"):
+            value = str(card.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def build_token_map(
+    contact: Optional[Mapping[str, Any]] = None,
+    context: Optional[Mapping[str, Any]] = None,
+    agent_name: str = "",
+) -> dict[str, str]:
+    """Resolve known placeholder tokens to real values for this call.
+
+    ``contact`` is the contact card packed in room/token metadata; ``context``
+    is the backend's call-context JSON (institution_name + optional contact).
+    ``[Expected Return Date]`` has no data source, so it maps to "" (dropped).
+
+    ``agent_name`` fills ``[Agent Name]``; empty falls back to
+    "an AI assistant" so disclosures never dangle.
+    """
+    ctx = context if isinstance(context, Mapping) else {}
+    ctx_contact = ctx.get("contact") if isinstance(ctx.get("contact"), Mapping) else {}
+    institution = str(ctx.get("institution_name") or "").strip()
+    name = _first_name(contact, ctx_contact)
+    who = str(agent_name or "").strip() or "an AI assistant"
+    return {
+        "[Institution Name]": institution,
+        "[Company Name]": institution,
+        "[Student Name]": name,
+        "[Lead Name]": name,
+        "[Parent/Guardian Name]": name,
+        "[Agent Name]": who,
+        "[Expected Return Date]": "",
+    }
+
+
+_CARD_PARENT_KEYS = ("parent_name", "parent", "guardian", "contact_person")
+_CARD_SUBJECT_KEYS = ("student_name", "full_name", "contact_name", "lead_name", "candidate_name", "name")
+
+
+def _card_value(card: Mapping[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(card.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def build_opening_line(
+    config: Mapping[str, Any],
+    tokens: Optional[Mapping[str, str]] = None,
+    contact: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """Deterministic opening: disclosure + greeting + first question.
+
+    Everything is token-substituted, so no ``[...]`` placeholder can ship.
+    Returns "" when there is no disclosure script — the caller then falls
+    back to the prompt-driven auto-turn.
+    """
+    tok = dict(tokens or {})
+    disclosure = apply_token_substitution(_disclosure_text(config), tok)
+    if not disclosure:
+        return ""
+    card = contact if isinstance(contact, Mapping) else {}
+    parent = _card_value(card, _CARD_PARENT_KEYS)
+    subject = _card_value(card, _CARD_SUBJECT_KEYS)
+    institution = tok.get("[Institution Name]", "") or tok.get("[Company Name]", "")
+    who = tok.get("[Agent Name]", "") or "an AI assistant"
+    if parent and subject and parent != subject:
+        if institution:
+            greet = f"Hello {parent}, this is {who} calling from {institution} about {subject}."
+        else:
+            greet = f"Hello {parent}, this is {who} calling about {subject}."
+    elif subject:
+        if institution:
+            greet = f"Hello {subject}, this is {who} calling from {institution}."
+        else:
+            greet = f"Hello {subject}, this is {who} calling."
+    elif institution:
+        greet = f"Hello, this is {who} calling from {institution}."
+    else:
+        greet = "Hello."
+    first_question = ""
+    flow = config.get("question_flow") if isinstance(config, Mapping) else []
+    if isinstance(flow, list):
+        for item in flow:
+            text_value = apply_token_substitution(_question_text(item), tok)
+            if text_value:
+                first_question = text_value
+                break
+    opening = f"{disclosure} {greet}"
+    if first_question:
+        opening += f" {first_question}"
+    return scrub_speech_text(opening)
 
 
 def _disclosure_text(config: Mapping[str, Any]) -> str:
@@ -192,23 +353,32 @@ def render_caller_context(contact: Mapping[str, Any]) -> str:
 
 
 def render_system_prompt(
-    config: Mapping[str, Any], contact: Optional[Mapping[str, Any]] = None
+    config: Mapping[str, Any],
+    contact: Optional[Mapping[str, Any]] = None,
+    tokens: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Render the full agent instructions from an agent-version config.
 
     ``contact`` (optional, P0-2) is the flat custom-field card packed into the
     room/token metadata; when present a CALLER CONTEXT section personalizes
     the prompt and adds the parent-verification rule.
+
+    ``tokens`` (optional, C) is a resolved token map (``[Institution Name]`` ->
+    value) applied to the disclosure, system_prompt, and question_flow text so
+    literal ``[Institution Name]`` placeholders never ship. Empty values are
+    removed.
     """
     sections: list[str] = []
 
     # 1. Disclosure FIRST and verbatim.
-    disclosure = _disclosure_text(config)
+    disclosure = apply_token_substitution(_disclosure_text(config), tokens)
     if disclosure:
         sections.append(f"{DISCLOSURE_HEADER}\n{disclosure}")
 
     # 2. Role & mission — platform baseline, then the creator's definition.
-    system_prompt = str(config.get("system_prompt") or "").strip()
+    system_prompt = apply_token_substitution(
+        str(config.get("system_prompt") or "").strip(), tokens
+    )
     role_lines: list[str] = [
         "You are a human-sounding phone agent making a single outbound call.",
         "This is a real-time SPOKEN conversation: the caller hears your words read aloud by a voice engine.",
@@ -304,7 +474,7 @@ def render_system_prompt(
     goal_items: list[str] = []
     number = 0
     for item in question_flow:
-        text = _question_text(item)
+        text = apply_token_substitution(_question_text(item), tokens)
         if not text:
             continue
         number += 1
@@ -331,6 +501,10 @@ def render_system_prompt(
         "call `record_extracted_field(field_name, value, confidence)` in that same turn. "
         "Do not wait until the end of the call.",
         "- Use the EXACT field names listed below. Value must be quoted as the caller said it.",
+        "- Invoke `record_extracted_field` through your real FUNCTION-CALLING mechanism. "
+        "NEVER write tool-call markup into your spoken text - never output `<tool_call>`, "
+        "`<function=...>`, `<parameter=...>`, or `tool_calls` JSON. If you don't yet have a "
+        "real value, keep asking a short clarifying question - do not invent one or fake a call.",
         "- Give an honest confidence between 0.0 and 1.0. If you clearly heard it, say 0.9. "
         "If you are guessing, do NOT record - ask a short clarifying question instead.",
         "- NEVER fabricate or guess a value. Uncertain means ask again, differently.",
