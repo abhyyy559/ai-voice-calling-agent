@@ -678,6 +678,25 @@ async def create_turn(
     if not start_event and not user_text:
         raise HTTPException(status_code=422, detail="'text' must not be empty.")
 
+    return await _run_agent_turn(
+        db, settings, call, version, user_text=user_text, start_event=start_event
+    )
+
+
+async def _run_agent_turn(
+    db: Session,
+    settings: Settings,
+    call: Call,
+    version: AgentVersion,
+    *,
+    user_text: str,
+    start_event: bool,
+) -> dict[str, Any]:
+    """One text-mode agent turn: build prompt, call Groq, run tools, persist.
+
+    Shared by the HTTP turns endpoint and the campaign dry-run runner so
+    simulated calls go through byte-identical conversation logic.
+    """
     contact = (call.context or {}).get("contact") or {}
     org = db.get(Organization, call.org_id) if call.org_id else None
     institution = org.name if org and org.name else ""
