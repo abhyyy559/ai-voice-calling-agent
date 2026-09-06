@@ -282,7 +282,10 @@ def test_empty_institution_drops_cleanly() -> None:
     prompt = _render_text_system_prompt(_config(), contact={"student_name": "Aarav"}, institution="")
     assert "Aarav" in prompt
     assert "[Institution Name]" not in prompt
-    assert "  " not in prompt
+    # Scoped: the static HOW-TO-REPLY block intentionally uses two-space
+    # indentation, so the no-gap check applies to substituted text only.
+    disclosure_line = next(l for l in prompt.splitlines() if "AI assistant calling from" in l)
+    assert "  " not in disclosure_line
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -411,11 +414,29 @@ Change the disclosure line (line 315) to substitute:
     disclosure = apply_token_substitution(str(config.disclosure_script or "").strip(), tokens)
 ```
 
-Change the persona line (line 327) to substitute:
+Change the persona handling (lines 327-330) to substitute and render the
+creator's role as its own authoritative block, mirroring voice-agent
+`render_system_prompt` §2b (this module is its slim server-side twin):
 
 ```python
     persona = apply_token_substitution(str(config.system_prompt or "").strip(), tokens)
+    sections.append(
+        "WHO YOU ARE:\n" + "\n".join(f"- {line}" for line in role_lines)
+    )
+    # 2b. Creator's role definition - authoritative, verbatim (not a bullet).
+    if persona:
+        sections.append(
+            "ROLE & MISSION - defined by the agent creator (AUTHORITATIVE):\n"
+            f"{persona}\n"
+            "This role definition is authoritative for WHO you are and HOW you "
+            "behave: where it differs from generic examples, follow the role "
+            "definition."
+        )
 ```
+
+(Controller amendment 2026-09-06: the implementer's 2b structure was accepted
+over the original one-line substitution — twin-parity with the voice worker,
+persona still verbatim, regression suites green.)
 
 Replace the whole 3b block (lines 349-407, the `if contact:` ... `sections.append("\n".join(context_lines))`) with:
 
