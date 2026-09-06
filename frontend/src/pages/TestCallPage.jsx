@@ -149,7 +149,7 @@ export default function TestCallPage() {
         {error && <div className="banner banner-error">{error}</div>}
 
         <div className="form-actions">
-          <button className="btn primary" disabled={busy || !(domainId || versionId)} onClick={placeCall}>
+          <button className="btn btn-primary" disabled={busy || !(domainId || versionId)} onClick={placeCall}>
             {busy ? 'Placing call…' : 'Place test call'}
           </button>
         </div>

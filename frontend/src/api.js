@@ -157,15 +157,19 @@ export const agentsApi = {
 };
 
 export const playgroundApi = {
-  startSession: (agentVersionId, contact) =>
-    apiFetch('/api/playground/sessions', {
+  startSession: (agentVersionId, contact) => {
+    const card = Object.fromEntries(
+      Object.entries(contact || {}).filter(([, v]) => String(v ?? '').trim())
+    );
+    return apiFetch('/api/playground/sessions', {
       method: 'POST',
       body: JSON.stringify(
-        contact && Object.keys(contact).length
-          ? { agent_version_id: agentVersionId, contact }
+        Object.keys(card).length
+          ? { agent_version_id: agentVersionId, contact: card }
           : { agent_version_id: agentVersionId }
       ),
-    }),
+    });
+  },
   completeSession: (callId) => apiFetch(`/api/playground/sessions/${callId}/complete`, { method: 'POST' }),
   // Text mode: one conversational turn (or {event:'start'} for the opening line).
   sendTurn: (callId, body) =>
