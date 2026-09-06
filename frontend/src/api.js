@@ -157,10 +157,14 @@ export const agentsApi = {
 };
 
 export const playgroundApi = {
-  startSession: (agentVersionId) =>
+  startSession: (agentVersionId, contact) =>
     apiFetch('/api/playground/sessions', {
       method: 'POST',
-      body: JSON.stringify({ agent_version_id: agentVersionId }),
+      body: JSON.stringify(
+        contact && Object.keys(contact).length
+          ? { agent_version_id: agentVersionId, contact }
+          : { agent_version_id: agentVersionId }
+      ),
     }),
   completeSession: (callId) => apiFetch(`/api/playground/sessions/${callId}/complete`, { method: 'POST' }),
   // Text mode: one conversational turn (or {event:'start'} for the opening line).
@@ -168,6 +172,12 @@ export const playgroundApi = {
     apiFetch(`/api/playground/sessions/${callId}/turns`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  // SIMULATION ONLY: run campaign contacts through text-mode turns. No telephony.
+  runDryRun: (campaignId, body) =>
+    apiFetch(`/api/playground/campaigns/${campaignId}/dry-run`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
     }),
 };
 
@@ -219,4 +229,8 @@ export const api = {
 
 export function campaignExportUrl(campaignId, format) {
   return `${API_BASE}/api/campaigns/${campaignId}/export?format=${encodeURIComponent(format)}`;
+}
+
+export function callExportUrl(callId, format) {
+  return `${API_BASE}/api/calls/${callId}/export?format=${encodeURIComponent(format)}`;
 }

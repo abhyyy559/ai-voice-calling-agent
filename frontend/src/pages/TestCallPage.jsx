@@ -1,37 +1,67 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api.js';
+import { agentsApi, api } from '../api.js';
+import LeadCardForm, { ABSENT_STUDENT_DEFAULTS } from '../components/LeadCardForm.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 
 export default function TestCallPage() {
   const [domains, setDomains] = useState([]);
   const [domainsError, setDomainsError] = useState(null);
   const [domainId, setDomainId] = useState('');
+  const [agents, setAgents] = useState([]);
+  const [agentId, setAgentId] = useState('');
+  const [versions, setVersions] = useState([]);
+  const [versionId, setVersionId] = useState('');
+  const [contactCard, setContactCard] = useState({ ...ABSENT_STUDENT_DEFAULTS });
   const [to, setTo] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const [placedWith, setPlacedWith] = useState(null);
 
   useEffect(() => {
-    api
-      .listDomainConfigs()
-      .then((list) => {
-        setDomains(Array.isArray(list) ? list : []);
-        setDomainsError(null);
-      })
-      .catch((e) => setDomainsError(e.message));
+    api.listDomainConfigs().then((list) => {
+      setDomains(Array.isArray(list) ? list : []);
+      setDomainsError(null);
+    }).catch((e) => setDomainsError(e.message));
+    agentsApi.list().then((list) => {
+      setAgents(Array.isArray(list) ? list : []);
+    }).catch(() => setAgents([]));
   }, []);
+
+  useEffect(() => {
+    if (!agentId) {
+      setVersions([]);
+      setVersionId('');
+      return;
+    }
+    agentsApi.listVersions(agentId).then((list) => {
+      const arr = Array.isArray(list) ? list : [];
+      setVersions(arr);
+      setVersionId(arr.length ? String(arr[arr.length - 1].id) : '');
+    }).catch(() => {
+      setVersions([]);
+      setVersionId('');
+    });
+  }, [agentId]);
 
   async function placeCall() {
     setBusy(true);
     setError(null);
     setResult(null);
-    const payload = { domain_config_id: domainId };
+    const payload = {};
+    if (domainId) payload.domain_config_id = Number(domainId);
+    if (versionId) payload.agent_version_id = Number(versionId);
+    const card = Object.fromEntries(
+      Object.entries(contactCard || {}).filter(([, v]) => String(v || '').trim())
+    );
+    if (Object.keys(card).length) payload.contact = card;
     const trimmed = to.trim();
     if (trimmed) payload.to = trimmed;
     try {
       const res = await api.placeTestCall(payload);
       setResult(res || {});
+      setPlacedWith(versionId ? `agent version ${versionId}` : 'latest agent version');
     } catch (e) {
       setError(e.message || 'Could not place test call.');
     } finally {
@@ -52,7 +82,7 @@ export default function TestCallPage() {
 
       <div className="card">
         <div className="field">
-          <label htmlFor="tc-domain">Call domain</label>
+          <label htmlFor="tc-domain">Call domain (optional — derived from the agent version when blank)</label>
           <select id="tc-domain" value={domainId} onChange={(e) => setDomainId(e.target.value)}>
             <option value="">Select a call domain…</option>
             {domains.map((d) => (
@@ -67,6 +97,40 @@ export default function TestCallPage() {
             <p className="hint">No domain configs available yet — add one first (see /domain-configs).</p>
           )}
         </div>
+
+        <div className="field">
+          <label htmlFor="tc-agent">Agent</label>
+          <select id="tc-agent" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+            <option value="">Select an agent…</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field">
+          <label htmlFor="tc-version">Agent version</label>
+          <select
+            id="tc-version"
+            value={versionId}
+            onChange={(e) => setVersionId(e.target.value)}
+            disabled={!agentId}
+          >
+            <option value="">{agentId ? 'Latest version' : 'Pick an agent first…'}</option>
+            {versions.map((v) => (
+              <option key={v.id} value={v.id}>
+                v{v.version} — saved {v.created_at ? new Date(v.created_at).toLocaleString() : `#${v.id}`}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <details className="card" open>
+          <summary>Who are we calling? (optional lead card)</summary>
+          <LeadCardForm value={contactCard} onChange={setContactCard} defaults={ABSENT_STUDENT_DEFAULTS} />
+        </details>
 
         <div className="field">
           <label htmlFor="tc-to">Call destination (optional)</label>
@@ -85,7 +149,7 @@ export default function TestCallPage() {
         {error && <div className="banner banner-error">{error}</div>}
 
         <div className="form-actions">
-          <button className="btn btn-primary" disabled={busy || !domainId} onClick={placeCall}>
+          <button className="btn primary" disabled={busy || !(domainId || versionId)} onClick={placeCall}>
             {busy ? 'Placing call…' : 'Place test call'}
           </button>
         </div>
@@ -93,6 +157,7 @@ export default function TestCallPage() {
         {result && (
           <div className="banner banner-success">
             <strong>Test call placed.</strong>
+            {placedWith && <span> Placed with {placedWith}.</span>}
             <div className="result-grid">
               <span>
                 Status: <StatusBadge status={result.status} />

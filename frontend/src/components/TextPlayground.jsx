@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { playgroundApi } from '../api.js';
+import LeadCardForm, { ABSENT_STUDENT_DEFAULTS } from './LeadCardForm.jsx';
 
 export function confidenceClass(v) {
   const n = typeof v === 'number' ? v : Number(v);
@@ -22,8 +23,10 @@ export function confidenceClass(v) {
  *                  extracted_fields, latency, outcome, ...}) handed to the
  *                  parent for the full-report view / last-run preview.
  *   autoStart      begin the session as soon as versionId is set (default true)
+ *   contact        optional lead-card object passed to startSession; falls back
+ *                  to the card edited in the form below (applies on (re)start).
  */
-export default function TextPlayground({ versionId, onFinishReport, autoStart = true }) {
+export default function TextPlayground({ versionId, onFinishReport, autoStart = true, contact }) {
   const [messages, setMessages] = useState([]); // [{speaker:'caller'|'agent', text}]
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -32,10 +35,15 @@ export default function TextPlayground({ versionId, onFinishReport, autoStart = 
   const [fields, setFields] = useState([]);
   const [completing, setCompleting] = useState(false);
   const [attempt, setAttempt] = useState(0); // bump to retry a failed start
+  const [contactCard, setContactCard] = useState(contact || { ...ABSENT_STUDENT_DEFAULTS });
 
   const sessionRef = useRef(null);
   const logRef = useRef(null);
   const lastReportRef = useRef(null);
+  // Mirror so the (re)start effect always reads the latest card without
+  // restarting the session on every keystroke.
+  const contactRef = useRef(contactCard);
+  contactRef.current = contactCard;
 
   // (Re)start the session whenever the target version changes.
   useEffect(() => {
@@ -53,7 +61,7 @@ export default function TextPlayground({ versionId, onFinishReport, autoStart = 
     setBusy(true);
     (async () => {
       try {
-        const sess = await playgroundApi.startSession(Number(versionId));
+        const sess = await playgroundApi.startSession(Number(versionId), contactRef.current);
         if (cancelled) return;
         sessionRef.current = sess;
         const res = await playgroundApi.sendTurn(sess.call_id, { event: 'start' });
@@ -131,6 +139,10 @@ export default function TextPlayground({ versionId, onFinishReport, autoStart = 
 
   return (
     <div className="text-playground">
+      <details className="card" open>
+        <summary>Who are we calling? (optional lead card)</summary>
+        <LeadCardForm value={contactCard} onChange={setContactCard} defaults={ABSENT_STUDENT_DEFAULTS} />
+      </details>
       <div className="form-actions space-between tp-toolbar">
         <span className="meta-line">
           {done ? (

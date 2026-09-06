@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { agentsApi, playgroundApi } from '../api.js';
-import TranscriptView from '../components/TranscriptView.jsx';
+import { agentsApi, callExportUrl, playgroundApi } from '../api.js';
 import LatencyPanel from '../components/LatencyPanel.jsx';
+import LeadCardForm, { ABSENT_STUDENT_DEFAULTS } from '../components/LeadCardForm.jsx';
 import TextPlayground, { confidenceClass } from '../components/TextPlayground.jsx';
+import { cleanTranscriptText } from '../utils/transcript.js';
+
 
 const PHASES = {
   SETUP: 'setup',
@@ -41,6 +43,7 @@ export default function PlaygroundPage() {
   const [versions, setVersions] = useState([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState(routeVersionId || '');
+  const [contactCard, setContactCard] = useState({ ...ABSENT_STUDENT_DEFAULTS });
   const [versionInfo, setVersionInfo] = useState(null); // {agentName, version}
   const [infoError, setInfoError] = useState(null);
 
@@ -240,11 +243,12 @@ export default function PlaygroundPage() {
     } catch {
       return;
     }
-    if (!text.trim()) return;
+    const cleanText = cleanTranscriptText(text);
+    if (!cleanText) return;
     setCaptions((prev) =>
       [
         ...prev,
-        { speaker: speaker || (participant && participant.identity) || 'agent', text, ts: Date.now() },
+        { speaker: speaker || (participant && participant.identity) || 'agent', text: cleanText, ts: Date.now() },
       ].slice(-200)
     );
   }
@@ -330,7 +334,7 @@ export default function PlaygroundPage() {
 
     let sess;
     try {
-      sess = await playgroundApi.startSession(Number(selectedVersionId));
+      sess = await playgroundApi.startSession(Number(selectedVersionId), contactCard);
       sessionRef.current = sess;
     } catch (e) {
       setConnectError(e.message || 'Could not start a playground session.');
@@ -403,54 +407,48 @@ export default function PlaygroundPage() {
 
   // ------------------------------------------------------------------ render
 
-  function renderFieldsTable(fields) {
+  function renderLatencySidebar(turns) {
     return (
-      <div className="table-wrap">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Field</th>
-              <th>Value</th>
-              <th style={{ width: '130px' }}>Confidence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {fields.map((f, i) => (
-              <tr key={`${f.field_name}-${i}`}>
-                <td className="cell-strong">{f.field_name}</td>
-                <td>{f.field_value != null ? String(f.field_value) : '—'}</td>
-                <td>
-                  <span className={`badge ${confidenceClass(f.confidence) || 'badge-gray'}`}>
-                    {f.confidence != null && !Number.isNaN(Number(f.confidence))
-                      ? `${Math.round(
-                          Number(f.confidence) <= 1 ? Number(f.confidence) * 100 : Number(f.confidence)
-                        )}%`
-                      : '—'}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div style={{ marginTop: 18 }}>
+        <b style={{ fontSize: 13 }}>Latency</b>
+        <div style={{ marginTop: 8 }}>
+          <LatencyPanel turns={turns} />
+        </div>
+      </div>
+    );
+  }
+
+  function renderLiveLatencySidebar(turns) {
+    return (
+      <div style={{ marginTop: 18 }}>
+        <b style={{ fontSize: 13 }}>
+          Latency <span style={{ color: 'var(--dim)', fontWeight: 400 }}>· live</span>
+        </b>
+        <div style={{ marginTop: 8 }}>
+          <LatencyPanel turns={turns} />
+        </div>
       </div>
     );
   }
 
   if (phase === PHASES.TEXT) {
     return (
-      <div className="narrow-wide">
-        <div className="page-head">
-          <div>
-            <h2 className="page-title">Playground — text mode</h2>
-            <p className="page-sub">
-              Same agent, same conversation flow — typed instead of spoken. Everything is recorded exactly like a
-              voice test.
-            </p>
+      <div className="pg">
+        <div className="card" style={{ padding: '20px 24px' }}>
+          <div className="card-h" style={{ marginBottom: 0 }}>
+            <h3>Text mode · same extraction pipeline</h3>
+            <span className="chip queued"><i></i>sandbox</span>
           </div>
-        </div>
-
-        <div className="card chat-panel">
-          <div className="form-actions space-between" style={{ marginBottom: 12 }}>
+          <TextPlayground
+            key={selectedVersionId}
+            versionId={selectedVersionId}
+            contact={contactCard}
+            onFinishReport={(res) => {
+              setResult(res || {});
+              setPhase(PHASES.ENDED);
+            }}
+          />
+          <div className="form-actions space-between" style={{ marginTop: 12 }}>
             <span className="meta-line">
               {versionInfo && (
                 <>
@@ -467,16 +465,15 @@ export default function PlaygroundPage() {
               Back to setup
             </button>
           </div>
-
-          <TextPlayground
-            key={selectedVersionId}
-            versionId={selectedVersionId}
-            onFinishReport={(res) => {
-              setResult(res || {});
-              setPhase(PHASES.ENDED); // reuse the full voice-mode report view
-            }}
-          />
         </div>
+        <aside className="card pad">
+          <b style={{ fontSize: 13 }}>
+            Extracted fields <span style={{ color: 'var(--dim)', fontWeight: 400 }}>· live</span>
+          </b>
+          <div style={{ marginTop: 8 }}>
+            <p className="hint">Start a session to watch fields fill in real time.</p>
+          </div>
+        </aside>
       </div>
     );
   }
@@ -484,40 +481,51 @@ export default function PlaygroundPage() {
   if (phase === PHASES.IN_CALL || phase === PHASES.CONNECTING) {
     const connecting = phase === PHASES.CONNECTING;
     const speaking = micLevel > MIC_SPEAK_THRESHOLD;
+    const orbState = connecting ? 'listening' : speaking ? 'speaking' : bargeIn ? 'interrupted' : 'listening';
+    const isLive = !connecting;
+    const agentFields = (result && result.extracted_fields) || [];
+    const agentTurns = (result && result.transcript) || [];
     return (
-      <div className="playground-live">
-        <div className="card playground-console">
-          <div className="playground-status">
-            <div className="playground-timer" aria-label={`Call duration ${fmtClock(elapsedMs)}`}>
+      <div className="pg">
+        <div className="card" style={{ padding: '10px 26px 26px' }}>
+          <div className="card-h">
+            <h3>{versionInfo ? `${versionInfo.agentName || 'Unknown'} · live session` : 'Live session'}</h3>
+            <span className={`chip in-progress`} id="stateChip">
+              <i></i>{connecting ? 'Connecting…' : speaking ? 'Listening' : bargeIn ? 'Interrupted' : 'Agent on the line'}
+            </span>
+          </div>
+          <div className="orb-wrap">
+            <button className={`big-orb${isLive ? ' live' : ''}`} data-m={orbState} aria-label="Session orb">
+              <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
+                <rect x="9" y="3" width="6" height="11" rx="3" fill="#e9e4da" />
+                <path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke="#e9e4da" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--dim)' }}>
               {fmtClock(elapsedMs)}
-            </div>
-            {connecting ? (
-              <span className="live-indicator big">
-                <span className="spinner spinner-inline" /> Connecting…
-              </span>
+            </span>
+          </div>
+          <div className="caps">
+            {captions.length === 0 ? (
+              <p className="hint" style={{ alignSelf: 'center' }}>
+                {connecting ? 'Connecting…' : 'Waiting for captions…'}
+              </p>
             ) : (
-              <span className={`live-indicator big${speaking ? ' speaking' : ''}`}>
-                <span className="live-dot" /> {speaking ? 'Listening…' : 'Agent on the line'}
-              </span>
-            )}
-            {bargeIn && (
-              <span className="badge badge-orange barge-badge" title="You spoke while the agent was talking">
-                Barge-in detected
-              </span>
+              captions.slice(-8).map((cap, i) => {
+                const isAgent = ['agent', 'ai', 'bot', 'assistant', 'system', 'voice_agent'].includes(
+                  String(cap.speaker || '').toLowerCase()
+                );
+                return (
+                  <div key={`${cap.ts}-${i}`} className={`cap-bub ${isAgent ? 'agent' : 'caller'}`}>
+                    <span className="cap-who">{isAgent ? 'Agent' : 'Caller'}</span>
+                    {cap.text}
+                  </div>
+                );
+              })
             )}
           </div>
-
-          <div className="playground-meter" aria-hidden="true">
-            <div className="playground-meter-fill" style={{ width: `${Math.min(100, micLevel * 160)}%` }} />
-          </div>
-
-          <p className="hint">
-            Talk naturally — you can interrupt the agent mid-sentence and it will stop and listen. Press{' '}
-            <strong>End call</strong> when done; the transcript and results appear right after.
-          </p>
-
-          <div className="form-actions">
-            <button type="button" className="btn btn-danger btn-lg" onClick={endCall} disabled={connecting}>
+          <div className="form-actions" style={{ justifyContent: 'flex-end', marginTop: 14 }}>
+            <button type="button" className="btn btn-danger btn-sm" onClick={endCall} disabled={connecting}>
               End call
             </button>
           </div>
@@ -525,14 +533,29 @@ export default function PlaygroundPage() {
 
         {statusNote && <div className="banner banner-info">{statusNote}</div>}
 
-        <div className="card">
-          <h3 className="card-title">Live captions</h3>
-          {captions.length === 0 ? (
-            <p className="hint">Waiting for captions… (they stream in here as the conversation progresses)</p>
-          ) : (
-            <TranscriptView turns={captions.slice(-8)} emptyText="No captions." />
-          )}
-        </div>
+        <aside className="card pad">
+          <b style={{ fontSize: 13 }}>
+            Extracted fields <span style={{ color: 'var(--dim)', fontWeight: 400 }}>· live</span>
+          </b>
+          <div style={{ marginTop: 8 }}>
+            {agentFields.map((f, i) => (
+              <div key={`${f.field_name}-${i}`} className="frow2">
+                <span className="k">{f.field_name}</span>
+                <span>
+                  {f.field_value != null ? String(f.field_value) : '— not captured yet'}{' '}
+                  <span className={`confchip ${confidenceClass(f.confidence)}`}>
+                    {f.confidence != null && !Number.isNaN(Number(f.confidence))
+                      ? `${Math.round(
+                          Number(f.confidence) <= 1 ? Number(f.confidence) * 100 : Number(f.confidence)
+                        )}%`
+                      : ''}
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+          {renderLiveLatencySidebar(agentTurns)}
+        </aside>
       </div>
     );
   }
@@ -540,67 +563,129 @@ export default function PlaygroundPage() {
   if (phase === PHASES.ENDED) {
     const turns = (result && result.transcript) || [];
     const fields = (result && result.extracted_fields) || [];
+    const resolvedCallId = result && (result.call_id || (sessionRef.current && sessionRef.current.call_id));
     return (
-      <div className="stack">
-        <button type="button" className="btn btn-ghost self-start" onClick={backToSetup}>
-          ← Run another test
-        </button>
+      <div className="pg">
+        <div className="card" style={{ padding: '24px' }}>
+          <button type="button" className="btn btn-ghost self-start" onClick={backToSetup}>
+            ← Run another test
+          </button>
 
-        <div className="banner banner-success">
-          <strong>Call finished.</strong>{' '}
-          {result && result.duration_seconds != null && <>Duration: {fmtClock(result.duration_seconds * 1000)}. </>}
-          {result && result.flagged_for_human ? 'This session was flagged for human review.' : null}
-        </div>
-
-        {completeError && (
-          <div className="banner banner-error">
-            {completeError}{' '}
-            <button type="button" className="btn btn-secondary btn-sm" onClick={completeSession} disabled={completing}>
-              {completing ? 'Retrying…' : 'Retry'}
-            </button>
+          <div className="banner banner-success" style={{ marginTop: 12 }}>
+            <strong>Call finished.</strong>{' '}
+            {result && result.duration_seconds != null && <>Duration: {fmtClock(result.duration_seconds * 1000)}. </>}
+            {result && result.flagged_for_human ? 'This session was flagged for human review.' : null}
           </div>
-        )}
 
-        {!result && !completeError && (
-          <div className="loading-page">
-            <span className="spinner" /> Collecting transcript and results…
-          </div>
-        )}
+          {completeError && (
+            <div className="banner banner-error" style={{ marginTop: 12 }}>
+              {completeError}{' '}
+              <button type="button" className="btn btn-secondary btn-sm" onClick={completeSession} disabled={completing}>
+                {completing ? 'Retrying…' : 'Retry'}
+              </button>
+            </div>
+          )}
 
-        {result && (
-          <>
-            <div className="card">
-              <h3 className="card-title">Extracted fields</h3>
-              {fields.length === 0 ? (
-                <p className="hint">No structured fields were extracted during this call.</p>
-              ) : (
-                renderFieldsTable(fields)
-              )}
-              {result.outcome ? (
-                <p className="hint">
+          {!result && !completeError && (
+            <div className="loading-page" style={{ marginTop: 20 }}>
+              <span className="spinner" /> Collecting transcript and results…
+            </div>
+          )}
+
+          {result && (
+            <>
+              <div style={{ marginTop: 20 }}>
+                <h3 className="card-title">Transcript</h3>
+                {turns.length === 0 ? (
+                  <p className="hint">No transcript was recorded for this session.</p>
+                ) : (
+                  <div className="transcript" aria-live="polite">
+                    {turns.map((t, i) => {
+                      const isAgent = ['agent', 'ai', 'bot', 'assistant', 'system', 'voice_agent'].includes(
+                        String(t.speaker || '').toLowerCase()
+                      );
+                      const displayName = isAgent
+                        ? 'Agent'
+                        : t.speaker
+                          ? String(t.speaker)
+                            .replace(/[_-]+/g, ' ')
+                            .replace(/\b\w/g, (ch) => ch.toUpperCase())
+                          : 'Caller';
+                      return (
+                        <div key={t.turn_index != null ? `turn-${t.turn_index}` : `i-${i}`} className={`cap-bub ${isAgent ? 'agent' : 'caller'}`}>
+                          <span className="cap-who">{displayName}</span>
+                          {cleanTranscriptText(t.text)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {result.outcome && (
+                <p className="hint" style={{ marginTop: 12 }}>
                   Outcome: <span className="chip">{String(result.outcome)}</span>
                 </p>
-              ) : null}
-            </div>
+              )}
 
-            <div className="card">
-              <h3 className="card-title">Latency</h3>
-              <LatencyPanel turns={turns} summary={result.latency} />
-            </div>
+              {versionInfo && versionInfo.agentName && (
+                <p className="hint" style={{ marginTop: 12 }}>
+                  Tested <strong>{versionInfo.agentName}</strong> v{versionInfo.version}.{' '}
+                  <Link to="/agents">Back to agents</Link> · <Link to="/campaigns">Launch this agent as a campaign</Link>
+                </p>
+              )}
+            </>
+          )}
+        </div>
 
-            <div className="card">
-              <h3 className="card-title">Transcript</h3>
-              <TranscriptView turns={turns} emptyText="No transcript was recorded for this session." />
-            </div>
-
-            {versionInfo && versionInfo.agentName && (
+        <aside className="card pad">
+          <b style={{ fontSize: 13 }}>Extracted fields</b>
+          <div style={{ marginTop: 8 }}>
+            {fields.length === 0 ? (
               <p className="hint">
-                Tested <strong>{versionInfo.agentName}</strong> v{versionInfo.version}.{' '}
-                <Link to="/agents">Back to agents</Link> · <Link to="/campaigns">Launch this agent as a campaign</Link>
+                No structured fields were extracted during this call. The agent collects fields during calls; check the
+                transcript for what it asked.
               </p>
+            ) : (
+              fields.map((f, i) => (
+                <div key={`${f.field_name}-${i}`} className="frow2">
+                  <span className="k">{f.field_name}</span>
+                  <span>
+                    {f.field_value != null ? String(f.field_value) : '—'}{' '}
+                    <span className={`confchip ${confidenceClass(f.confidence)}`}>
+                      {f.confidence != null && !Number.isNaN(Number(f.confidence))
+                        ? `${Math.round(
+                            Number(f.confidence) <= 1 ? Number(f.confidence) * 100 : Number(f.confidence)
+                          )}%`
+                        : ''}
+                    </span>
+                  </span>
+                </div>
+              ))
             )}
-          </>
-        )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
+            {resolvedCallId && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => window.open(callExportUrl(resolvedCallId, 'csv'), '_blank')}
+                >
+                  Export CSV
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => window.open(callExportUrl(resolvedCallId, 'xlsx'), '_blank')}
+                >
+                  Export XLSX
+                </button>
+              </>
+            )}
+          </div>
+          {renderLatencySidebar(turns)}
+        </aside>
       </div>
     );
   }
@@ -608,123 +693,114 @@ export default function PlaygroundPage() {
   // ------------------------------------------------------------------ setup
 
   return (
-    <div className="narrow-wide">
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">Playground</h2>
-          <p className="page-sub">
-            Test any saved agent version straight from this browser — speak over your microphone or type in Text mode.
-            Nothing is dialed, so it costs zero telephony minutes.
-          </p>
+    <div className="pg">
+      <div className="card" style={{ padding: '24px' }}>
+        <div className="card-h">
+          <h3>Set up a test session</h3>
+          <span style={{ fontSize: 12, color: 'var(--dim)' }}>sandbox</span>
         </div>
-      </div>
 
-      {fatalError ? (
-        <div className="stack">
-          <div className="banner banner-error">{fatalError}</div>
-          <div className="card">
-            <div className="form-actions">
+        {fatalError && (
+          <div style={{ marginTop: 20 }}>
+            <div className="banner banner-error">{fatalError}</div>
+            <div className="form-actions" style={{ marginTop: 12 }}>
               <button type="button" className="btn btn-primary" onClick={backToSetup}>
                 Back to setup
               </button>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="stack">
-          <div className="tab-row" role="tablist" aria-label="Test mode">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === MODES.VOICE}
-              className={`tab-btn${mode === MODES.VOICE ? ' active' : ''}`}
-              onClick={() => {
-                setMode(MODES.VOICE);
-                setConnectError(null);
-              }}
-            >
-              Voice (mic)
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === MODES.TEXT}
-              className={`tab-btn${mode === MODES.TEXT ? ' active' : ''}`}
-              onClick={() => {
-                setMode(MODES.TEXT);
-                setConnectError(null);
-              }}
-            >
-              Text
-            </button>
-          </div>
+        )}
 
-          {!routeVersionId && (
-            <div className="card">
-              <h3 className="card-title">Choose what to test</h3>
-              {agentsError && (
-                <div className="banner banner-error">
-                  {agentsError}{' '}
-                  <Link to="/agents/new" className="btn btn-secondary btn-sm">
-                    Create an agent
-                  </Link>
-                </div>
-              )}
-              {!agentsError && agents && agents.length === 0 && (
-                <div className="empty-state">
-                  No agents yet — build one first.
-                  <div className="form-actions">
-                    <Link to="/agents/new" className="btn btn-primary">
-                      + New Agent
+        {!fatalError && (
+          <div style={{ marginTop: 20 }}>
+            <div className="mode-toggle">
+              <button
+                type="button"
+                className={mode === MODES.VOICE ? 'on' : ''}
+                onClick={() => {
+                  setMode(MODES.VOICE);
+                  setConnectError(null);
+                }}
+              >
+                Voice session
+              </button>
+              <button
+                type="button"
+                className={mode === MODES.TEXT ? 'on' : ''}
+                onClick={() => {
+                  setMode(MODES.TEXT);
+                  setConnectError(null);
+                }}
+              >
+                Text mode
+              </button>
+            </div>
+
+            {!routeVersionId && (
+              <div style={{ marginTop: 20 }}>
+                {agentsError && (
+                  <div className="banner banner-error">
+                    {agentsError}{' '}
+                    <Link to="/agents/new" className="btn btn-secondary btn-sm">
+                      Create an agent
                     </Link>
                   </div>
-                </div>
-              )}
-              {!agentsError && agents && agents.length > 0 && (
-                <div className="picker-row">
-                  <div className="field">
-                    <label htmlFor="pg-agent">Agent</label>
-                    <select
-                      id="pg-agent"
-                      value={selectedAgentId}
-                      onChange={(e) => setSelectedAgentId(e.target.value)}
-                    >
-                      {agents.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name}
-                        </option>
-                      ))}
-                    </select>
+                )}
+                {!agentsError && agents && agents.length === 0 && (
+                  <div className="empty-state">
+                    No agents yet — build one first.
+                    <div className="form-actions">
+                      <Link to="/agents/new" className="btn btn-primary">
+                        + New Agent
+                      </Link>
+                    </div>
                   </div>
-                  <div className="field">
-                    <label htmlFor="pg-version">Version</label>
-                    <select
-                      id="pg-version"
-                      value={selectedVersionId}
-                      onChange={(e) => setSelectedVersionId(e.target.value)}
-                      disabled={versionsLoading}
-                    >
-                      {versionsLoading && <option>Loading…</option>}
-                      {!versionsLoading &&
-                        versions.map((v) => (
-                          <option key={v.id} value={v.id}>
-                            v{v.version} — saved {new Date(v.created_at).toLocaleString()}
+                )}
+                {!agentsError && agents && agents.length > 0 && (
+                  <>
+                    <div className="fieldrow" style={{ marginTop: 12 }}>
+                      <label>Agent</label>
+                      <select
+                        value={selectedAgentId}
+                        onChange={(e) => setSelectedAgentId(e.target.value)}
+                      >
+                        {agents.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.name}
                           </option>
                         ))}
-                      {!versionsLoading && versions.length === 0 && <option value="">No saved versions yet</option>}
-                    </select>
-                  </div>
-                </div>
-              )}
-              {infoError && <p className="hint hint-error">{infoError}</p>}
-            </div>
-          )}
+                      </select>
+                    </div>
+                    <div className="fieldrow" style={{ marginTop: 8 }}>
+                      <label>Version</label>
+                      <select
+                        value={selectedVersionId}
+                        onChange={(e) => setSelectedVersionId(e.target.value)}
+                        disabled={versionsLoading}
+                      >
+                        {versionsLoading && <option>Loading…</option>}
+                        {!versionsLoading &&
+                          versions.map((v) => (
+                            <option key={v.id} value={v.id}>
+                              v{v.version} — saved {new Date(v.created_at).toLocaleString()}
+                            </option>
+                          ))}
+                        {!versionsLoading && versions.length === 0 && <option value="">No saved versions yet</option>}
+                      </select>
+                    </div>
+                  </>
+                )}
+                {infoError && <p className="hint hint-error" style={{ marginTop: 8 }}>{infoError}</p>}
+              </div>
+            )}
+            <details className="card" open style={{ marginTop: 12 }}>
+              <summary>Who are we calling? (optional lead card)</summary>
+              <LeadCardForm value={contactCard} onChange={setContactCard} defaults={ABSENT_STUDENT_DEFAULTS} />
+            </details>
 
-          {selectedVersionId && mode === MODES.VOICE && (
-            <>
-              <div className="card">
-                <h3 className="card-title">Before you start</h3>
-                <p>
+            {selectedVersionId && mode === MODES.VOICE && (
+              <div style={{ marginTop: 20 }}>
+                <p style={{ fontSize: 13.5, lineHeight: 1.6 }}>
                   Your browser will ask for microphone permission — this is required so the agent can hear you. Audio
                   plays through your speakers or headset, exactly like a phone call. The whole conversation is recorded
                   as a test session you can review afterwards.
@@ -734,73 +810,98 @@ export default function PlaygroundPage() {
                   selected in your browser's site settings.
                 </p>
               </div>
-              <div className="card">
-                <h3 className="card-title">Ready to talk</h3>
-                {versionInfo ? (
-                  <p className="meta-line">
-                    <span>
-                      <strong>Agent:</strong> {versionInfo.agentName || '(unknown)'}
-                    </span>
-                    <span>
-                      <strong>Version:</strong> v{versionInfo.version}
-                    </span>
-                  </p>
-                ) : (
-                  <p className="hint">Loading version details…</p>
-                )}
-                {connectError && <div className="banner banner-error">{connectError}</div>}
-                <div className="form-actions">
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-lg"
-                    onClick={startCall}
-                    disabled={phase === PHASES.CONNECTING || !selectedVersionId}
-                  >
-                    {phase === PHASES.CONNECTING ? 'Connecting…' : 'Enable microphone & start call'}
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
+            )}
 
-          {selectedVersionId && mode === MODES.TEXT && (
-            <div className="card">
-              <h3 className="card-title">Ready to chat</h3>
-              {versionInfo ? (
-                <p className="meta-line">
-                  <span>
-                    <strong>Agent:</strong> {versionInfo.agentName || '(unknown)'}
-                  </span>
-                  <span>
-                    <strong>Version:</strong> v{versionInfo.version}
-                  </span>
+            {selectedVersionId && mode === MODES.TEXT && (
+              <div style={{ marginTop: 20 }}>
+                <p className="hint">
+                  No microphone or voice room needed. The agent opens with its disclosure and first question; reply by
+                  typing. Extraction and the final report work exactly like a voice test.
                 </p>
-              ) : (
-                <p className="hint">Loading version details…</p>
-              )}
-              <p className="hint">
-                No microphone or voice room needed. The agent opens with its disclosure and first question; reply by
-                typing. Extraction and the final report work exactly like a voice test.
-              </p>
-              {connectError && <div className="banner banner-error">{connectError}</div>}
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary btn-lg"
-                  onClick={() => {
-                    setResult(null);
-                    setFatalError(null);
-                    setConnectError(null);
-                    setPhase(PHASES.TEXT);
-                  }}
-                >
-                  Start text test call
-                </button>
               </div>
-            </div>
-          )}
+            )}
+
+            {selectedVersionId && (
+              <div style={{ display: 'flex', gap: 12, marginTop: 26 }}>
+                {mode === MODES.VOICE && (
+                  <>
+                    {versionInfo && (
+                      <span className="meta-line" style={{ alignSelf: 'center', fontSize: 13 }}>
+                        <strong>Agent:</strong> {versionInfo.agentName || '(unknown)'} · v{versionInfo.version}
+                      </span>
+                    )}
+                    {connectError && <div className="banner banner-error" style={{ width: '100%' }}>{connectError}</div>}
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ padding: '13px 26px' }}
+                      onClick={startCall}
+                      disabled={phase === PHASES.CONNECTING || !selectedVersionId}
+                    >
+                      {phase === PHASES.CONNECTING ? 'Connecting…' : 'Start Voice Session'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setResult(null);
+                        setFatalError(null);
+                        setConnectError(null);
+                        setPhase(PHASES.TEXT);
+                      }}
+                    >
+                      Start in Text Mode
+                    </button>
+                  </>
+                )}
+                {mode === MODES.TEXT && (
+                  <>
+                    {versionInfo && (
+                      <span className="meta-line" style={{ alignSelf: 'center', fontSize: 13 }}>
+                        <strong>Agent:</strong> {versionInfo.agentName || '(unknown)'} · v{versionInfo.version}
+                      </span>
+                    )}
+                    {connectError && <div className="banner banner-error" style={{ width: '100%' }}>{connectError}</div>}
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ padding: '13px 26px' }}
+                      onClick={() => {
+                        setResult(null);
+                        setFatalError(null);
+                        setConnectError(null);
+                        setPhase(PHASES.TEXT);
+                      }}
+                    >
+                      Start in Text Mode
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setMode(MODES.VOICE);
+                        setConnectError(null);
+                      }}
+                    >
+                      Voice Session
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <aside className="card pad">
+        <b style={{ fontSize: 13 }}>
+          Extracted fields <span style={{ color: 'var(--dim)', fontWeight: 400 }}>· live</span>
+        </b>
+        <div style={{ marginTop: 8 }}>
+          <p className="hint">Start a session to watch fields fill in real time.</p>
         </div>
-      )}
+        <div style={{ marginTop: 18 }} />
+      </aside>
     </div>
   );
 }
