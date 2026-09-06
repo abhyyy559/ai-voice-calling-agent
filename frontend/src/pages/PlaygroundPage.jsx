@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { agentsApi, callExportUrl, playgroundApi } from '../api.js';
+import { agentsApi, api, callExportUrl, playgroundApi } from '../api.js';
 import LatencyPanel from '../components/LatencyPanel.jsx';
 import LeadCardForm, { ABSENT_STUDENT_DEFAULTS } from '../components/LeadCardForm.jsx';
 import TextPlayground, { confidenceClass } from '../components/TextPlayground.jsx';
@@ -69,6 +69,7 @@ export default function PlaygroundPage() {
   const micTrackRef = useRef(null);
   const timerRef = useRef(null);
   const levelTimerRef = useRef(null);
+  const statusTimerRef = useRef(null);
   const startedAtRef = useRef(0);
   const userEndedRef = useRef(false);
   const reconnectTriesRef = useRef(0);
@@ -152,6 +153,7 @@ export default function PlaygroundPage() {
     () => () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (levelTimerRef.current) clearInterval(levelTimerRef.current);
+      if (statusTimerRef.current) clearInterval(statusTimerRef.current);
       try {
         roomRef.current && roomRef.current.disconnect();
       } catch {
@@ -164,17 +166,37 @@ export default function PlaygroundPage() {
   function startTimers() {
     if (timerRef.current) clearInterval(timerRef.current);
     if (levelTimerRef.current) clearInterval(levelTimerRef.current);
+    if (statusTimerRef.current) clearInterval(statusTimerRef.current);
     startedAtRef.current = Date.now();
     setElapsedMs(0);
     timerRef.current = setInterval(() => setElapsedMs(Date.now() - startedAtRef.current), 500);
     levelTimerRef.current = setInterval(pollMicLevel, 150);
+    // Auto-hangup: when the agent ends the call server-side, the room stays
+    // open — poll the call status and cut the call (disconnect + results)
+    // without the user having to press End call.
+    statusTimerRef.current = setInterval(pollCallStatus, 3000);
+  }
+
+  async function pollCallStatus() {
+    const sess = sessionRef.current;
+    if (!sess || !roomRef.current) return;
+    try {
+      const call = await api.getCall(sess.call_id);
+      if (call && call.status === 'completed' && roomRef.current) {
+        await endCall();
+      }
+    } catch {
+      /* transient failure — the next poll retries */
+    }
   }
 
   function stopTimers() {
     if (timerRef.current) clearInterval(timerRef.current);
     if (levelTimerRef.current) clearInterval(levelTimerRef.current);
+    if (statusTimerRef.current) clearInterval(statusTimerRef.current);
     timerRef.current = null;
     levelTimerRef.current = null;
+    statusTimerRef.current = null;
   }
 
   function pollMicLevel() {
@@ -320,9 +342,14 @@ export default function PlaygroundPage() {
     setBargeIn(false);
 
     // Trigger the browser mic prompt explicitly so a denial surfaces as a
-    // clear message instead of a cryptic room error.
+    // clear message instead of a cryptic room error. Echo cancellation,
+    // noise suppression, and gain control are requested so the agent's own
+    // speech coming out of the speakers is not picked back up — no manual
+    // muting/unmuting needed during the call.
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       stream.getTracks().forEach((t) => t.stop());
     } catch {
       setConnectError(

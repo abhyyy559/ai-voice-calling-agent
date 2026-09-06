@@ -125,6 +125,21 @@ def _voice_overrides(voice_settings: Optional[Mapping[str, Any]]) -> tuple[str, 
     return llm_model, tts_voice, vbl, lang
 
 
+def _cartesia_speed(speaking_rate: Any) -> Optional[float]:
+    """Map the platform speaking_rate onto Cartesia's speed multiplier.
+
+    Platform range is 0.5-2.0 (1.0 = normal); Cartesia accepts 0.6-1.5, so
+    clamp. Returns None at ~normal so the API default applies untouched.
+    """
+    try:
+        rate = float(speaking_rate)
+    except (TypeError, ValueError):
+        return None
+    if abs(rate - 1.0) < 0.05:
+        return None
+    return min(1.5, max(0.6, rate))
+
+
 def build_providers(
     settings: Settings,
     voice_settings: Optional[Mapping[str, Any]] = None,
@@ -163,6 +178,11 @@ def build_providers(
         tts_kwargs: dict[str, Any] = {}
         if effective_voice:
             tts_kwargs["voice"] = effective_voice
+        # speaking_rate was previously collected but never applied; wire it
+        # so slower/clearer speech (e.g. 0.9 for names) actually takes effect.
+        speed = _cartesia_speed((voice_settings or {}).get("speaking_rate", 1.0))
+        if speed is not None:
+            tts_kwargs["speed"] = speed
         bundle.tts = cartesia.TTS(api_key=settings.cartesia_api_key, **tts_kwargs)
     else:
         bundle.problems.append("CARTESIA_API_KEY missing - text-to-speech disabled")

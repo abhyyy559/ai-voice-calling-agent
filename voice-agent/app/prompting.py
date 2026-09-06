@@ -170,18 +170,25 @@ def build_opening_line(
     subject = _card_value(card, _CARD_SUBJECT_KEYS)
     institution = tok.get("[Institution Name]", "") or tok.get("[Company Name]", "")
     who = tok.get("[Agent Name]", "") or "an AI assistant"
+    # Short standalone sentences (not one long clause): the TTS engine
+    # synthesizes sentence by sentence, so names get clean prosodic breaks
+    # and are pronounced far more clearly than mid-sentence.
     if parent and subject and parent != subject:
         if institution:
-            greet = f"Hello {parent}, this is {who} calling from {institution} about {subject}."
+            greet = (
+                f"Hello {parent}. "
+                f"This is {who} calling from {institution}. "
+                f"I'm calling about {subject}."
+            )
         else:
-            greet = f"Hello {parent}, this is {who} calling about {subject}."
+            greet = f"Hello {parent}. This is {who} calling about {subject}."
     elif subject:
         if institution:
-            greet = f"Hello {subject}, this is {who} calling from {institution}."
+            greet = f"Hello {subject}. This is {who} calling from {institution}."
         else:
-            greet = f"Hello {subject}, this is {who} calling."
+            greet = f"Hello {subject}. This is {who} calling."
     elif institution:
-        greet = f"Hello, this is {who} calling from {institution}."
+        greet = f"Hello. This is {who} calling from {institution}."
     else:
         greet = "Hello."
     first_question = ""

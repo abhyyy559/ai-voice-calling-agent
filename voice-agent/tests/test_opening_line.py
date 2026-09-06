@@ -41,6 +41,14 @@ def test_opening_line_empty_without_disclosure() -> None:
     assert build_opening_line({"question_flow": []}, {}, {}) == ""
 
 
+def test_opening_line_uses_short_sentences_for_tts_clarity() -> None:
+    contact = {"student_name": "Aarav Kumar", "parent_name": "Suresh Kumar"}
+    out = build_opening_line(CONFIG, _tokens(contact), contact)
+    assert "Hello Suresh Kumar." in out
+    assert "This is an AI assistant calling from Demo School." in out
+    assert "I'm calling about Aarav Kumar." in out
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.said: list[tuple[str, bool]] = []

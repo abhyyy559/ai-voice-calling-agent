@@ -43,12 +43,14 @@ export default function LeadCardForm({ value, onChange, defaults }) {
       {rows.map(([k, v], i) => (
         <div className="field" key={i}>
           <input
+            type="text"
             aria-label="Field name"
             value={k}
             placeholder="field name"
             onChange={(e) => updateRow(i, e.target.value, v)}
           />
           <input
+            type="text"
             aria-label="Field value"
             value={v}
             placeholder="value"
