@@ -45,7 +45,7 @@ from app.extraction_tools import (
     ExtractionCoordinator,
     VoiceAgentTools,
 )
-from app.prompting import render_system_prompt
+from app.prompting import build_opening_line, build_token_map, render_system_prompt, scrub_speech_text
 
 logger = logging.getLogger("voice_agent.pipeline")
 
@@ -146,10 +146,12 @@ def build_providers(
         # P0-1 endpointing tuning: the livekit-plugins-deepgram 1.7.0 kwarg is
         # ``endpointing_ms`` (introspected signature has NO ``endpointing``);
         # plugin default is a hair-trigger 25 ms which fragments speech.
+        # 300ms (echo hardening): the agent's own looped-back TTS audio must
+        # not hair-trigger a retrigger at the old 200ms.
         bundle.stt = deepgram.STT(
             model="nova-3",
             language=stt_lang,
-            endpointing_ms=200,
+            endpointing_ms=300,
             api_key=settings.deepgram_api_key,
         )
     else:
@@ -322,8 +324,17 @@ class TurnTelemetry:
         item = getattr(ev, "item", None)
         if item is None:
             return
+        # Only real assistant MESSAGE items carry spoken text. Function calls
+        # and tool results (item.type in {"function_call", "tool_call", ...})
+        # must never enter captions/_agent_text/transcript (B).
+        item_type = str(getattr(item, "type", "") or "").lower()
+        if item_type and item_type not in {"message", "assistant_message", "text"}:
+            return
+        tool_calls = getattr(item, "tool_calls", None)
+        if tool_calls:
+            return
         role = str(getattr(item, "role", "")).lower()
-        text = str(getattr(item, "text_content", "") or "").strip()
+        text = scrub_speech_text(getattr(item, "text_content", ""))
         if role == "assistant" and text:
             if not self._got_agent_item and self._llm_first_token_ms is None and self._reply_start_at is not None:
                 # APPROXIMATION fallback: item commit time - reply start upper-
@@ -594,6 +605,24 @@ def _required_fields_from_schema(config: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(required)
 
 
+async def _speak_opening(
+    session: Any,
+    config: Mapping[str, Any],
+    tokens: Mapping[str, str],
+    contact: Optional[Mapping[str, Any]],
+) -> bool:
+    """Speak the composed opening with interruptions disabled.
+
+    Returns True when spoken; False (fall back to the prompt-driven
+    auto-turn) when there is no disclosure script to anchor it.
+    """
+    opening = build_opening_line(config, tokens, contact)
+    if not opening:
+        return False
+    await session.say(opening, allow_interruptions=False)
+    return True
+
+
 async def run_session(ctx: JobContext, settings: Settings) -> None:
     """Full lifecycle for one accepted playground job. Never raises."""
     room_name = ctx.room.name or ""
@@ -657,17 +686,26 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
         assert bundle.stt is not None and bundle.llm is not None
         assert bundle.tts is not None
 
-        instructions = render_system_prompt(config, contact=parsed.contact)
+        # Fetch per-call context (institution_name + contact) once at session
+        # start; {} on failure is fine — tokens resolve to empty and are dropped.
+        call_context = await backend.fetch_call_context(call_id)
+        instructions = render_system_prompt(
+            config,
+            contact=parsed.contact,
+            tokens=build_token_map(contact=parsed.contact, context=call_context),
+        )
+        schema = config.get("extraction_schema") or {}
         coordinator = ExtractionCoordinator(
             required_fields=_required_fields_from_schema(config),
             low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
             max_asks_per_field=MAX_ASKS_PER_FIELD,
+            schema=schema,
         )
         tools_impl = VoiceAgentTools(
             coordinator,
             backend,
             call_id,
-            schema=config.get("extraction_schema") or {},
+            schema=schema,
         )
 
         session = AgentSession(
@@ -683,12 +721,13 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
             # Snappier endpointing than defaults (NFR-1: median <=900ms).
             min_endpointing_delay=0.35,
             max_endpointing_delay=1.5,
-            # False-interruption hardening (owner report: background speech
-            # was cutting the agent off mid-sentence).
-            min_interruption_duration=0.35,
+            # Echo hardening: the agent's own TTS can loop back into its STT.
+            # These knobs prevent a false interruption from replaying the whole
+            # reply and stop hair-trigger retriggering on looped-back audio.
+            min_interruption_duration=0.5,
             false_interruption_timeout=2.0,
-            resume_false_interruption=True,
-            discard_audio_if_uninterruptible=False,
+            resume_false_interruption=False,
+            discard_audio_if_uninterruptible=True,
         )
         telemetry = TurnTelemetry(
             session=session,
@@ -704,6 +743,14 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
 
         agent = DomainCallAgent(instructions=instructions, tools_impl=tools_impl)
         await session.start(room=ctx.room, agent=agent)
+        # Agent speaks first: the composed opening cannot be barged by
+        # background noise, and names are real (token-substituted).
+        await _speak_opening(
+            session,
+            config,
+            build_token_map(contact=parsed.contact, context=call_context),
+            parsed.contact,
+        )
     except Exception:
         logger.exception("Unhandled error in voice session (room=%s)", room_name)
         try:

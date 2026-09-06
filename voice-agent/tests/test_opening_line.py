@@ -1,4 +1,7 @@
 """Deterministic protected opening line: disclosure + greeting + first question."""
+import asyncio
+
+from app import pipeline as pipeline_module
 from app.prompting import build_opening_line, build_token_map
 
 CONFIG = {
@@ -36,3 +39,32 @@ def test_opening_line_no_names_no_invention() -> None:
 
 def test_opening_line_empty_without_disclosure() -> None:
     assert build_opening_line({"question_flow": []}, {}, {}) == ""
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.said: list[tuple[str, bool]] = []
+
+    async def say(self, text: str, allow_interruptions: bool = True) -> None:
+        self.said.append((text, allow_interruptions))
+
+
+def test_speak_opening_protected_and_first() -> None:
+    session = _FakeSession()
+    contact = {"student_name": "Aarav Kumar", "parent_name": "Suresh Kumar"}
+    tokens = build_token_map(contact=contact, context={"institution_name": "Demo School"})
+    spoken = asyncio.run(pipeline_module._speak_opening(session, CONFIG, tokens, contact))
+    assert spoken is True
+    assert len(session.said) == 1
+    text, allow_interruptions = session.said[0]
+    assert allow_interruptions is False
+    assert text.startswith("Hi, this is an AI assistant calling from Demo School.")
+    assert "Suresh Kumar" in text and "Aarav Kumar" in text
+    assert "[" not in text and "]" not in text
+
+
+def test_speak_opening_skips_without_disclosure() -> None:
+    session = _FakeSession()
+    spoken = asyncio.run(pipeline_module._speak_opening(session, {"question_flow": []}, {}, {}))
+    assert spoken is False
+    assert session.said == []
