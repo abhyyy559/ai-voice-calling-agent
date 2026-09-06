@@ -519,7 +519,7 @@ def _test_number_app(session_factory):  # type: ignore[no-untyped-def]
     from app.main import create_app
 
     fresh = create_app(
-        make_settings(test_phone_number_list=["+919812345601"])
+        make_settings(test_phone_numbers="+919812345601")
     )
     fresh.state.session_factory = session_factory
     return fresh
@@ -576,7 +576,7 @@ def test_test_call_derives_domain_config_when_omitted(client, session_factory):
         assert "system_prompt" in (derived.config or {})
 ```
 
-Note: `client` here is the default conftest app client (for register/agent setup); the POST goes to a second app instance whose settings carry `test_phone_number_list` so the allowlist check passes with consent enforcement on. Both apps share `session_factory`, so rows are visible to both. The default `client` fixture's telephony is the in-memory fake (no provider credentials in test settings), returning `CAfake{call_id:010d}`.
+Note: `client` here is the default conftest app client (for register/agent setup); the POST goes to a second app instance whose settings carry `test_phone_numbers` (comma-separated string; `test_phone_number_list` is a read-only derived property, and `Settings` ignores extra kwargs — so pass `test_phone_numbers`) so the allowlist check passes with consent enforcement on. Both apps share `session_factory`, so rows are visible to both. The default `client` fixture's telephony is the in-memory fake (no provider credentials in test settings), returning `CAfake{call_id:010d}`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
