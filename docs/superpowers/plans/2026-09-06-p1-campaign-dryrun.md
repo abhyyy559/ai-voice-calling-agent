@@ -265,7 +265,9 @@ def test_lead_style_card_generic_phrasing() -> None:
     block = _render_caller_context(contact, "Acme Realty")
     assert "Riya" in block
     assert "Hyderabad" in block
-    assert "student" not in block.lower()
+    assert "the person Riya" in block
+    assert "absent" not in block.lower()
+    assert "class_section" not in block
 
 
 def test_empty_contact_guards_against_invented_names() -> None:
