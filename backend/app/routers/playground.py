@@ -28,8 +28,9 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.database import get_db
 from app.deps import get_current_user, get_org_or_404
-from app.models import Agent, AgentVersion, Call, ExtractedField, Transcript, User
+from app.models import Agent, AgentVersion, Call, Campaign, Contact, ExtractedField, Organization, Transcript, User
 from app.timeutil import utcnow
+from app.services.token_substitution import apply_token_substitution, build_token_map
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +301,92 @@ def _question_text(item: Any) -> str:
     return str(item or "").strip()
 
 
-def _render_text_system_prompt(config: Any, contact: Optional[dict[str, str]] = None) -> str:
+_GENERIC_SUBJECT_KEYS = ("full_name", "contact_name", "lead_name", "candidate_name", "name")
+_GENERIC_PARENT_KEYS = ("parent_name", "parent", "guardian", "contact_person")
+
+
+def _render_caller_context(contact: dict[str, str], institution: str) -> str:
+    """CALLER CONTEXT block that works for any domain, not just absent-student.
+
+    Known keys get human phrasing; every other supplied key is passed through
+    as a fact so domain-specific cards (city, budget, form_source, ...) still
+    reach the agent. With no contact, emits a do-not-invent-names guard.
+    """
+    lines = ["CALLER CONTEXT - who this specific call is about:"]
+    if institution:
+        lines.append(f"- You are calling from {institution}.")
+    if not contact:
+        lines.append(
+            "- You were NOT given the callee's name: NEVER invent or guess any name; "
+            "ask who you are speaking with."
+        )
+        return "\n".join(lines)
+
+    student = contact.get("student_name") or ""
+    parent = ""
+    for key in _GENERIC_PARENT_KEYS:
+        if contact.get(key):
+            parent = contact[key]
+            break
+    subject = ""
+    for key in _GENERIC_SUBJECT_KEYS:
+        if contact.get(key):
+            subject = contact[key]
+            break
+    about: list[str] = []
+    if student:
+        about.append(f"the student {student}")
+    if contact.get("class_section"):
+        about.append(f"class {contact['class_section']}")
+    if contact.get("absent_date"):
+        about.append(f"absent on {contact['absent_date']}")
+    if subject and subject != student:
+        about.append(f"the person {subject}")
+    if about:
+        lines.append("- You are calling about " + ", ".join(about) + ".")
+    else:
+        lines.append("- Details: " + json.dumps(contact, ensure_ascii=False))
+    woven = {"student_name", "class_section", "absent_date", *_GENERIC_SUBJECT_KEYS, *_GENERIC_PARENT_KEYS}
+    extras = {k: v for k, v in contact.items() if k not in woven}
+    if extras:
+        lines.append(
+            "- Other details you may use if relevant: "
+            + json.dumps(extras, ensure_ascii=False, sort_keys=True)
+        )
+    if parent:
+        lines.append(f"- Ask to speak with {parent} (the parent/guardian).")
+    elif subject:
+        lines.append(f"- Ask for {subject} when the call is answered.")
+
+    names: list[str] = []
+    for value in [parent, student, subject]:
+        if value and value not in names:
+            names.append(value)
+    if names:
+        lines.append(
+            "- SAY THE NAMES OUT LOUD: greet the person using their name. "
+            f"Known name(s) on this record: {', '.join(names)}."
+        )
+        lines.append(
+            "- NEVER say 'the parent or guardian of the student' or 'the person "
+            "we are calling about' when you have a real name on this record."
+        )
+    lines.extend(
+        [
+            "- VERIFY RELATIONSHIP BEFORE DETAILS: confirm you are speaking with the "
+            "right person before discussing any details.",
+            "- If the person who answered is NOT that person, do not share any details: "
+            "ask when they will be available, thank them politely, and end the call.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_text_system_prompt(
+    config: Any,
+    contact: Optional[dict[str, str]] = None,
+    institution: str = "",
+) -> str:
     """Slim server-side twin of voice-agent/app/prompting.render_system_prompt.
 
     Same section order and discipline (disclosure verbatim first, TTS-safe
@@ -311,8 +397,11 @@ def _render_text_system_prompt(config: Any, contact: Optional[dict[str, str]] = 
     """
     sections: list[str] = []
 
+    card = contact or {}
+    tokens = build_token_map(card, institution=institution)
+
     # 1. Mandatory disclosure FIRST and verbatim.
-    disclosure = str(config.disclosure_script or "").strip()
+    disclosure = apply_token_substitution(str(config.disclosure_script or "").strip(), tokens)
     if disclosure:
         sections.append(
             f"MANDATORY DISCLOSURE - your VERY FIRST utterance, word-for-word:\n{disclosure}"
@@ -324,12 +413,19 @@ def _render_text_system_prompt(config: Any, contact: Optional[dict[str, str]] = 
         "Every reply you type is read aloud by a speech engine exactly as written.",
         "Have a short natural conversation and complete the goals below.",
     ]
-    persona = str(config.system_prompt or "").strip()
-    if persona:
-        role_lines.append(f"Agent-specific role from the creator: {persona}")
+    persona = apply_token_substitution(str(config.system_prompt or "").strip(), tokens)
     sections.append(
         "WHO YOU ARE:\n" + "\n".join(f"- {line}" for line in role_lines)
     )
+    # 2b. Creator's role definition - authoritative, verbatim (not a bullet).
+    if persona:
+        sections.append(
+            "ROLE & MISSION - defined by the agent creator (AUTHORITATIVE):\n"
+            f"{persona}\n"
+            "This role definition is authoritative for WHO you are and HOW you "
+            "behave: where it differs from generic examples, follow the role "
+            "definition."
+        )
 
     # 3. Company context.
     company_context = config.company_context or {}
@@ -339,35 +435,8 @@ def _render_text_system_prompt(config: Any, contact: Optional[dict[str, str]] = 
             + json.dumps(company_context, ensure_ascii=False, default=str)
         )
 
-    # 3b. CALLER CONTEXT (P0-2) — who this specific call is about.
-    if contact:
-        student = contact.get("student_name") or ""
-        parent = contact.get("parent_name") or ""
-        context_lines = ["CALLER CONTEXT - who this call is about:"]
-        about: list[str] = []
-        if student:
-            about.append(f"the student {student}")
-        if contact.get("class_section"):
-            about.append(f"class {contact['class_section']}")
-        if contact.get("absent_date"):
-            about.append(f"absent on {contact['absent_date']}")
-        if about:
-            context_lines.append("- You are calling about " + ", ".join(about) + ".")
-        else:
-            context_lines.append(
-                "- Details: " + json.dumps(contact, ensure_ascii=False)
-            )
-        if parent:
-            context_lines.append(f"- Ask to speak with {parent} (the parent/guardian).")
-        context_lines.extend(
-            [
-                "- VERIFY RELATIONSHIP BEFORE DETAILS: confirm you are speaking with the "
-                "parent/guardian before discussing any details.",
-                "- If the person who answered is NOT the parent/guardian, do not share any details: "
-                "ask when they will be available, thank them politely, and end the call.",
-            ]
-        )
-        sections.append("\n".join(context_lines))
+    # 3b. CALLER CONTEXT (P0-2, generic) — who this specific call is about.
+    sections.append(_render_caller_context(card, institution))
 
     # 4. TTS-safe speaking style (kept identical in spirit to the voice agent).
     sections.append(
@@ -384,7 +453,7 @@ def _render_text_system_prompt(config: Any, contact: Optional[dict[str, str]] = 
     goals: list[str] = []
     number = 0
     for item in config.question_flow or []:
-        text_value = _question_text(item)
+        text_value = apply_token_substitution(_question_text(item), tokens)
         if not text_value:
             continue
         number += 1
@@ -609,9 +678,10 @@ async def create_turn(
     if not start_event and not user_text:
         raise HTTPException(status_code=422, detail="'text' must not be empty.")
 
-    system_prompt = _render_text_system_prompt(
-        version, contact=(call.context or {}).get("contact")
-    )
+    contact = (call.context or {}).get("contact") or {}
+    org = db.get(Organization, call.org_id) if call.org_id else None
+    institution = org.name if org and org.name else ""
+    system_prompt = _render_text_system_prompt(version, contact=contact, institution=institution)
     history_rows = list(
         db.scalars(
             select(Transcript)
@@ -635,8 +705,9 @@ async def create_turn(
             "followed by a warm one-line greeting and your first question."
         )
         contact = (call.context or {}).get("contact") or {}
-        student = str(contact.get("student_name") or "").strip()
-        parent = str(contact.get("parent_name") or "").strip()
+        tokens = build_token_map(contact, institution)
+        student = tokens["[Student Name]"]
+        parent = tokens["[Parent/Guardian Name]"]
         if student:
             kickoff += (
                 f" You are calling about {student}"
