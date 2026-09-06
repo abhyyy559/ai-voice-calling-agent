@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { getToken } from './api.js';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
-import LandingPage from './pages/LandingPage.jsx';
 import OverviewPage from './pages/OverviewPage.jsx';
 import AgentsPage from './pages/AgentsPage.jsx';
 import AgentDetailPage from './pages/AgentDetailPage.jsx';
@@ -15,6 +14,12 @@ import CallsIndexPage from './pages/CallsIndexPage.jsx';
 import GuidePage from './pages/GuidePage.jsx';
 import TestCallPage from './pages/TestCallPage.jsx';
 import PhoneNumbersPage from './pages/PhoneNumbersPage.jsx';
+
+// three.js (~600 kB) ships only on the marketing pages — keep it out of the
+// initial bundle the same way livekit-client is kept out.
+const LandingPage = lazy(() => import('./pages/LandingPage.jsx'));
+const PricingPage = lazy(() => import('./pages/PricingPage.jsx'));
+const RoadmapPage = lazy(() => import('./pages/RoadmapPage.jsx'));
 
 // livekit-client (~700 kB minified) is only needed on the Playground route —
 // keep it out of the initial bundle.
@@ -52,8 +57,10 @@ export default function App() {
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/login" element={<Login />} />
-          {/* Public marketing page. LandingPage itself bounces signed-in users home. */}
+          {/* Public marketing pages. LandingPage itself bounces signed-in users home. */}
           <Route path="/landing" element={<LandingPage />} />
+          <Route path="/pricing" element={<PricingPage />} />
+          <Route path="/roadmap" element={<RoadmapPage />} />
           <Route element={<AuthShell />}>
             <Route index element={<OverviewPage />} />
             <Route path="agents" element={<AgentsPage />} />
