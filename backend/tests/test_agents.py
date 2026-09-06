@@ -71,11 +71,13 @@ def test_real_estate_preset_has_qualification_schema(client):
     presets = client.get("/api/agents/presets", headers=auth_headers(token)).json()
     payload = next(p for p in presets if p["preset_id"] == "real-estate-lead-qualification")["version_payload"]
     assert set(payload["extraction_schema"]) >= {
-        "interest_level", "budget_band", "locality_preference",
-        "possession_timeline", "visit_date_preference", "call_outcome",
-        "escalation_needed",
+        "enquiry_confirmed", "still_interested", "property_type", "budget_band",
+        "locality_preference", "possession_timeline", "quotation_callback_slot",
+        "visit_date_preference", "call_outcome", "escalation_needed",
     }
-    assert len(payload["question_flow"]) == 5
+    assert len(payload["question_flow"]) == 6
+    prompt = payload["system_prompt"].lower()
+    assert "repeat" in prompt and "confirmation" in prompt and "quotation" in prompt
 
 
 def test_preset_payload_saves_as_agent_version(client):
