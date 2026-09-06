@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional
 
+from sqlalchemy import select
+
+from app.timeutil import utcnow
+
 PERSONA_ORDER: tuple[str, ...] = ("cooperative", "terse", "distracted", "refuses", "clueless")
 
 _PERSONA_SCRIPTS: dict[str, list[str]] = {
@@ -59,3 +63,102 @@ def persona_reply(
     if turn_no < 0 or turn_no >= len(script):
         return None
     return script[turn_no]
+
+
+_MAX_DRY_RUN_TURNS = 6
+
+
+def _mask_phone(phone: str) -> str:
+    text = str(phone or "")
+    if len(text) <= 4:
+        return "****"
+    return f"{text[:4]}****{text[-2:]}"
+
+
+def _contact_card(contact: Any) -> dict[str, str]:
+    card: dict[str, str] = {}
+    for key, value in ((contact.custom_fields or {}) if contact else {}).items():
+        name = str(key).strip()
+        if not name or isinstance(value, (dict, list)):
+            continue
+        text = str(value).strip()
+        if text:
+            card[name] = text
+    return card
+
+
+async def run_campaign_dry_run(
+    db: Any,
+    settings: Any,
+    run_turn: Any,
+    *,
+    campaign: Any,
+    version: Any,
+    contacts: list[Any],
+    persona_names: list[str],
+) -> dict[str, Any]:
+    """Simulate one text-mode call per contact against scripted personas.
+
+    Persists each simulation as a ``Call(kind="dry-run")`` so transcripts and
+    fields stay inspectable through the existing call-detail path. ``run_turn``
+    is ``_run_agent_turn`` injected for testability.
+    """
+    from app.models import Call, ExtractedField, Transcript  # local: avoids import cycles
+
+    results: list[dict[str, Any]] = []
+    for index, contact in enumerate(contacts):
+        persona = persona_names[index % len(persona_names)]
+        card = _contact_card(contact)
+        call = Call(
+            kind="dry-run",
+            status="in_progress",
+            org_id=campaign.org_id,
+            campaign_id=campaign.id,
+            contact_id=contact.id,
+            agent_version_id=version.id,
+            started_at=utcnow(),
+            context={"contact": card} if card else None,
+        )
+        db.add(call)
+        db.flush()
+
+        turns_used = 0
+        reply = await run_turn(db, settings, call, version, user_text="", start_event=True)
+        turns_used += 1
+        while not reply.get("done") and turns_used < _MAX_DRY_RUN_TURNS:
+            caller_line = persona_reply(persona, reply.get("reply_text") or "", turns_used - 1, card)
+            if not (caller_line or "").strip():
+                break
+            reply = await run_turn(db, settings, call, version, user_text=caller_line, start_event=False)
+            turns_used += 1
+        if call.status == "in_progress":
+            call.status = "completed"
+            call.ended_at = utcnow()
+        db.commit()
+
+        rows = db.scalars(
+            select(Transcript).where(Transcript.call_id == call.id).order_by(Transcript.turn_index)
+        ).all()
+        fields = db.scalars(
+            select(ExtractedField).where(ExtractedField.call_id == call.id).order_by(ExtractedField.id)
+        ).all()
+        results.append(
+            {
+                "contact_id": contact.id,
+                "name": contact.name,
+                "phone": _mask_phone(contact.phone),
+                "persona": persona,
+                "transcript": [
+                    {"role": ("agent" if r.speaker == "agent" else "caller"), "text": r.text}
+                    for r in rows
+                ],
+                "extracted_fields": [
+                    {"field_name": f.field_name, "field_value": f.field_value, "confidence": f.confidence}
+                    for f in fields
+                ],
+                "status": call.status,
+                "outcome": call.outcome,
+                "turns": turns_used,
+            }
+        )
+    return {"results": results}
