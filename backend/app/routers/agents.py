@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user, get_org_or_404, require_roles
-from app.models import AGENT_STATUSES, Agent, AgentVersion, User
+from app.models import AGENT_STATUSES, Agent, AgentVersion, DomainConfig, User
 from domain_config_schema import validate_agent_version_payload
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -316,3 +316,34 @@ def get_version(
     # Org check through the parent agent (404 on foreign org — no leak).
     get_org_or_404(db, Agent, version.agent_id, user.org_id)
     return _version_out(version)
+
+
+def ensure_domain_config(db: Session, agent: Agent, version: AgentVersion) -> DomainConfig:
+    """Find-or-create the legacy DomainConfig row anchoring an agent's phone path.
+
+    The voice brain is version-based, but campaigns and /api/test-call still
+    carry a ``domain_config_id`` FK. ``DomainConfig.name`` is globally unique,
+    so the auto row is namespaced per agent and never collides across orgs.
+    """
+    wanted = f"agent-{agent.id}-phone"
+    existing = db.scalar(select(DomainConfig).where(DomainConfig.name == wanted))
+    if existing is not None:
+        return existing
+    row = DomainConfig(
+        name=wanted,
+        display_name=agent.name,
+        config={
+            "domain_id": wanted,
+            "name": agent.name,
+            "version": version.version,
+            "system_prompt": version.system_prompt,
+            "mandatory_disclosure": version.disclosure_script,
+            "question_flow": version.question_flow or [],
+            "extraction_schema": version.extraction_schema or {},
+            "escalation_rules": version.escalation_rules or [],
+            "voice_settings": version.voice_settings or {},
+        },
+    )
+    db.add(row)
+    db.flush()
+    return row

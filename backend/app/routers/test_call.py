@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import Agent, AgentVersion, Call, Campaign, Contact, DomainConfig, User
+from app.routers.agents import ensure_domain_config
 from app.schemas import TestCallOut, TestCallRequest
 from app.services.calls_service import log_call_event
 from app.services.import_service import normalize_phone
@@ -64,9 +65,6 @@ def place_test_call(
             detail=f"{target} is not in TEST_PHONE_NUMBERS; consent enforcement is on",
         )
 
-    if db.get(DomainConfig, payload.domain_config_id) is None:
-        raise HTTPException(status_code=422, detail="unknown domain_config_id")
-
     if payload.agent_version_id is not None:
         version = db.scalar(
             select(AgentVersion)
@@ -86,23 +84,38 @@ def place_test_call(
         if version is None:
             raise HTTPException(status_code=422, detail="no agent versions in org")
 
+    if payload.domain_config_id is not None:
+        if db.get(DomainConfig, payload.domain_config_id) is None:
+            raise HTTPException(status_code=422, detail="unknown domain_config_id")
+        domain_config_id = payload.domain_config_id
+    else:
+        agent = db.get(Agent, version.agent_id)
+        domain_config_id = ensure_domain_config(db, agent, version).id
+
     campaign = db.scalar(select(Campaign).where(Campaign.name == TEST_CAMPAIGN_NAME))
     if campaign is None:
         campaign = Campaign(
-            name=TEST_CAMPAIGN_NAME, domain_config_id=payload.domain_config_id, status="draft"
+            name=TEST_CAMPAIGN_NAME, domain_config_id=domain_config_id, status="draft"
         )
         db.add(campaign)
         db.flush()
-    elif campaign.domain_config_id != payload.domain_config_id:
-        campaign.domain_config_id = payload.domain_config_id
+    elif campaign.domain_config_id != domain_config_id:
+        campaign.domain_config_id = domain_config_id
 
     contact = db.scalar(
         select(Contact).where(Contact.campaign_id == campaign.id, Contact.phone == target)
     )
     if contact is None:
+        contact_card: dict[str, Any] = {
+            "name": payload.contact.get("name") if payload.contact else None,
+            "phone": target,
+            "status": "pending_review",
+            "consent": True,
+            "consent_source": "test_allowlist",
+        }
         contact = Contact(
             campaign_id=campaign.id,
-            name=f"Test Call ({target})",
+            name=contact_card["name"] or f"Test Call ({target})",
             phone=target,
             status="pending_review",
             consent=True,
@@ -110,6 +123,15 @@ def place_test_call(
         )
         db.add(contact)
         db.flush()
+
+    # Merge per-contact details (student_name, parent_name, class_section, ...)
+    # into custom_fields so they reach the voice agent's CALLER CONTEXT and the
+    # agent greets the RIGHT person by NAME instead of asking who it is calling.
+    details = dict(payload.contact or {})
+    if details:
+        merged = dict(contact.custom_fields or {})
+        merged.update(details)
+        contact.custom_fields = merged
 
     now = utcnow()
     call = Call(

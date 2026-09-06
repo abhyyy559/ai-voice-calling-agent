@@ -241,8 +241,12 @@ class CallListItemOut(BaseModel):
 
 class TestCallRequest(BaseModel):
     to: Optional[str] = None
-    domain_config_id: int
+    domain_config_id: Optional[int] = None
     agent_version_id: Optional[int] = None  # phone leg: which agent version speaks
+    # Per-contact details the agent should know before it dials (student name,
+    # parent name, class, etc.). Stored into the contact's custom_fields and
+    # packed into the call room metadata so the agent greets the right person.
+    contact: Optional[dict[str, Any]] = None
 
 
 class TestCallOut(BaseModel):
