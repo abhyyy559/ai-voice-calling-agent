@@ -1184,7 +1184,7 @@ _PERSONA_SCRIPTS: dict[str, list[str]] = {
         "Okay bye now.",
     ],
     "refuses": [
-        "I don't want to talk about this, please don't call again.",
+        "I do not want to talk about this, please do not call again.",
         "Please remove our number. Goodbye.",
     ],
     "clueless": [
