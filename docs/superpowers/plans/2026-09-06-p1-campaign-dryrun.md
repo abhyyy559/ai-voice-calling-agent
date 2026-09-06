@@ -1506,7 +1506,7 @@ async def run_campaign_dry_run(
         reply = await run_turn(db, settings, call, version, user_text="", start_event=True)
         turns_used += 1
         while not reply.get("done") and turns_used < _MAX_DRY_RUN_TURNS:
-            caller_line = persona_reply(persona, reply.get("reply_text") or "", turns_used, card)
+            caller_line = persona_reply(persona, reply.get("reply_text") or "", turns_used - 1, card)
             if not (caller_line or "").strip():
                 break
             reply = await run_turn(db, settings, call, version, user_text=caller_line, start_event=False)
