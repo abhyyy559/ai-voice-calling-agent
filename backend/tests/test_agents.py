@@ -54,7 +54,7 @@ def test_list_presets_returns_valid_payloads(client):
     ids = {p["preset_id"] for p in presets}
     # The four shipped role presets are present.
     assert {"lead-verification", "appointment-confirmation", "feedback-survey",
-            "absent-student-followup"} <= ids
+            "absent-student-followup", "real-estate-lead-qualification"} <= ids
     for preset in presets:
         assert preset["name"]
         payload = preset["version_payload"]
@@ -64,6 +64,18 @@ def test_list_presets_returns_valid_payloads(client):
         assert payload["extraction_schema"]
         assert payload["disclosure_script"]
         assert payload["escalation_rules"]
+
+
+def test_real_estate_preset_has_qualification_schema(client):
+    token, _user = register(client)
+    presets = client.get("/api/agents/presets", headers=auth_headers(token)).json()
+    payload = next(p for p in presets if p["preset_id"] == "real-estate-lead-qualification")["version_payload"]
+    assert set(payload["extraction_schema"]) >= {
+        "interest_level", "budget_band", "locality_preference",
+        "possession_timeline", "visit_date_preference", "call_outcome",
+        "escalation_needed",
+    }
+    assert len(payload["question_flow"]) == 5
 
 
 def test_preset_payload_saves_as_agent_version(client):
