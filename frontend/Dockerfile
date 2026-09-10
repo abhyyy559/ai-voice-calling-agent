@@ -25,8 +25,8 @@ COPY index.html vite.config.js ./
 COPY src ./src
 
 # Vite bakes VITE_* variables in at BUILD time. The browser calls the FastAPI
-# backend directly on the host, hence http://localhost:8000 (overridable via
-# compose build args).
+# backend. Use http://localhost:8000 for host-running (default), or override via
+# compose build args for Docker internal access (e.g. http://backend:8000).
 ARG VITE_API_URL=http://localhost:8000
 ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build

@@ -24,6 +24,65 @@ router = APIRouter(tags=["devtools"])
 
 _REDIS_TIMEOUT_SECONDS = 0.5
 
+# Provider hosts the voice worker must reach (STT / TTS / LLM). Key PRESENCE
+# alone is not enough — a container can hold valid keys yet fail DNS/egress
+# (seen live: Deepgram ClientConnectorDNSError with a good key), so health
+# probes real TCP reachability, never key values.
+_EGRESS_TARGETS = {
+    "deepgram": ("api.deepgram.com", 443),
+    "cartesia": ("api.cartesia.ai", 443),
+    "groq": ("api.groq.com", 443),
+}
+_EGRESS_TIMEOUT_SECONDS = 2.0
+_EGRESS_TOTAL_TIMEOUT_SECONDS = 6.0
+
+
+def _tcp_ok(host: str, port: int, timeout: float = _EGRESS_TIMEOUT_SECONDS) -> bool:
+    """True when a TCP connection to host:port succeeds within timeout."""
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001 — health checks must never raise
+        return False
+
+
+def _pipeline_reachability(settings) -> dict[str, Any]:
+    """Egress + LiveKit reachability, bounded in time, never raising.
+
+    Runs each probe in a worker thread with an overall cap so one slow DNS
+    lookup cannot hang the health endpoint.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.parse import urlparse
+
+    jobs: dict[str, tuple[str, int]] = dict(_EGRESS_TARGETS)
+    livekit_host, livekit_port = "", 0
+    try:
+        parsed = urlparse(settings.livekit_url_internal or "")
+        if parsed.hostname:
+            livekit_host, livekit_port = parsed.hostname, parsed.port or 7880
+    except Exception:  # noqa: BLE001 — malformed URL just means "uncheckable"
+        pass
+    if livekit_host:
+        jobs["livekit_server"] = (livekit_host, livekit_port)
+
+    results: dict[str, bool] = {}
+    if not jobs:
+        return results
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {
+            name: pool.submit(_tcp_ok, host, port) for name, (host, port) in jobs.items()
+        }
+        deadline = _EGRESS_TOTAL_TIMEOUT_SECONDS / max(1, len(jobs))
+        for name, fut in futures.items():
+            try:
+                results[name] = bool(fut.result(timeout=deadline))
+            except Exception:  # noqa: BLE001 — timeout or worker error → down
+                results[name] = False
+    return results
+
 
 def _redis_ping(redis_url: str) -> bool:
     """True when redis answers PING; any failure means 'down', never a crash."""
@@ -57,12 +116,18 @@ def health(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     from app.main import db_ping
 
+    reachability = _pipeline_reachability(settings)
+    livekit_ws = reachability.pop("livekit_server", None)
     return {
         "db": db_ping(request.app.state.session_factory),
         "redis": _redis_ping(settings.redis_url),
         # No service registry this phase; the voice worker is checked manually.
         "voice_agent": "unknown",
         "providers": settings.provider_presence,
+        # Real TCP reachability from the backend network (keys can be present
+        # while egress/DNS is broken — this is what actually pages).
+        "egress": reachability,
+        "livekit_ws": livekit_ws,
     }
 
 

@@ -253,12 +253,22 @@ export default function PlaygroundPage() {
   function handleCaption(payload, participant) {
     let text = '';
     let speaker = '';
+    // The worker tags every caption with final:true/false (pipeline.py
+    // _publish_caption): partials stream while the caller is still speaking,
+    // one final commits the turn. Honor the flag so interim hypotheses update
+    // a single live bubble instead of each becoming its own message.
+    let final = true;
     try {
       const decoded = new TextDecoder().decode(payload);
       try {
         const obj = JSON.parse(decoded);
-        text = typeof obj === 'string' ? obj : String((obj && obj.text) || '');
-        speaker = (obj && obj.speaker) || '';
+        if (obj && typeof obj === 'object' && ('text' in obj || 'type' in obj)) {
+          text = String((obj && obj.text) || '');
+          speaker = (obj && obj.speaker) || '';
+          final = obj.final !== false;
+        } else {
+          text = typeof obj === 'string' ? obj : decoded;
+        }
       } catch {
         text = decoded;
       }
@@ -267,12 +277,24 @@ export default function PlaygroundPage() {
     }
     const cleanText = cleanTranscriptText(text);
     if (!cleanText) return;
-    setCaptions((prev) =>
-      [
-        ...prev,
-        { speaker: speaker || (participant && participant.identity) || 'agent', text: cleanText, ts: Date.now() },
-      ].slice(-200)
-    );
+    const who = speaker || (participant && participant.identity) || 'agent';
+    setCaptions((prev) => {
+      const next = prev.slice(-200);
+      const lastIdx = next.length - 1;
+      const last = lastIdx >= 0 ? next[lastIdx] : null;
+      // Identical repeat of the last committed bubble from the same speaker:
+      // never show twice (belt-and-braces against worker double-publish).
+      if (last && last.speaker === who && last.committed && last.text === cleanText) {
+        return prev;
+      }
+      // Live interim bubble for this speaker exists: update it in place.
+      if (last && last.speaker === who && !last.committed) {
+        const updated = next.slice();
+        updated[lastIdx] = { ...last, text: cleanText, ts: Date.now(), committed: final };
+        return updated;
+      }
+      return [...next, { speaker: who, text: cleanText, ts: Date.now(), committed: final }].slice(-200);
+    });
   }
 
   async function joinWithSession(sess) {

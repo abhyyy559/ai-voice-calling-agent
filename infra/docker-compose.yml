@@ -142,11 +142,13 @@ services:
       # Worker lives INSIDE the compose network -> use the service DNS name.
       # Provider keys (DEEPGRAM/CARTESIA/GROQ/GROQ_MODEL) come from ../.env
       # via env_file — do NOT redeclare them here with ${} defaults, an empty
-      # string would override the real value.
+      # string would override the real value. Same trap applied to
+      # LIVEKIT_API_KEY/SECRET and INTERNAL_API_TOKEN: host-side ${}
+      # interpolation silently fell back to placeholders whenever compose ran
+      # without --env-file, desyncing the worker from the LiveKit server
+      # (401 signature-invalid on every connect) and from the backend
+      # internal API (401 on /internal/*). env_file is the single source.
       LIVEKIT_URL: ws://livekit:7880
-      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
-      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret_for_local_dev_only}
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change_me_internal}
       BACKEND_INTERNAL_URL: http://backend:8000
       ENVIRONMENT: development
       LOG_LEVEL: info

@@ -5,7 +5,8 @@ import usePoll from '../hooks/usePoll.js';
 import HealthDot, { boolToState } from '../components/HealthDot.jsx';
 
 // ---------------------------------------------------------------------------
-// DEV ONLY. This entire page is compiled out of production builds.
+// DEV ONLY (login-protected). Hidden only when the build sets
+// VITE_DISABLE_DEVTOOLS=true.
 // ---------------------------------------------------------------------------
 
 const PROVIDER_ENV_VARS = {
@@ -309,8 +310,12 @@ function truncate(text, max = 1200) {
 }
 
 export default function DevToolsPage() {
-  // Owner mandate: the whole page disappears from production builds.
-  if (import.meta.env.PROD) {
+  // The page is login-protected (mounted under AuthShell). It is hidden only
+  // when explicitly disabled via VITE_DISABLE_DEVTOOLS=true at build time, so
+  // the docker dev stack (always a PROD vite build) keeps its status view.
+  // Previously this gated on import.meta.env.PROD, which compiled the page
+  // out of exactly the environment where it is needed.
+  if (import.meta.env.VITE_DISABLE_DEVTOOLS === 'true') {
     return <div className="empty-state">Dev tools are disabled in production builds.</div>;
   }
   return <DevToolsInner />;
@@ -472,6 +477,12 @@ function DevToolsInner() {
               <HealthDot label="Voice worker" state={toState(health.voice_agent)} note={String(health.voice_agent)} />
               {Object.entries(providers).map(([name, ok]) => (
                 <HealthDot key={name} label={`Provider: ${name}`} state={boolToState(ok)} />
+              ))}
+              {typeof health.livekit_ws !== 'undefined' && health.livekit_ws !== null && (
+                <HealthDot label="LiveKit server" state={boolToState(health.livekit_ws)} />
+              )}
+              {health.egress && Object.entries(health.egress).map(([name, ok]) => (
+                <HealthDot key={`egress-${name}`} label={`Reachable: ${name}`} state={boolToState(ok)} />
               ))}
             </div>
             {Object.entries(providers).some(([, ok]) => !ok) && (

@@ -22,6 +22,7 @@ import inspect
 import json
 import logging
 import time
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
@@ -202,6 +203,10 @@ def build_providers(
             # Qwen3 is a hybrid reasoning model — thinking tokens add seconds
             # of voice latency. Disable reasoning entirely (NFR-1).
             kwargs["reasoning_effort"] = "none"
+        # Voice turns are 1-3 sentences: cap output well under Groq's
+        # on_demand 1000 output-tokens/min tier (an uncapped request asks for
+        # ~1215 and gets 429 rate_limited, which wedges the whole call).
+        kwargs["max_completion_tokens"] = 300
         bundle.llm = openai.LLM(
             model=groq_model,
             api_key=settings.groq_api_key,
@@ -227,6 +232,20 @@ def build_providers(
 # --------------------------------------------------------------------------
 # Per-exchange latency + transcript telemetry
 # --------------------------------------------------------------------------
+
+
+#: Fire-and-forget tasks must stay referenced, or the event loop may
+#: garbage-collect them mid-flight (asyncio.create_task docs). This set holds
+#: every background task until it completes.
+_BACKGROUND_TASKS: set["asyncio.Task[Any]"] = set()
+
+
+def _spawn_task(coro: Coroutine[Any, Any, Any]) -> "asyncio.Task[Any]":
+    """Schedule a coroutine as a strong-referenced background task."""
+    task = asyncio.ensure_future(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
 
 
 class TurnTelemetry:
@@ -280,10 +299,7 @@ class TurnTelemetry:
             payload = json.dumps(
                 {"type": "caption", "speaker": speaker, "text": text, "final": final}
             ).encode("utf-8")
-            loop = asyncio.get_event_loop()
-            loop.create_task(
-                self._room.local_participant.publish_data(payload)
-            )
+            _spawn_task(self._room.local_participant.publish_data(payload))
         except Exception:
             logger.debug("Caption publish failed", exc_info=True)
 
@@ -297,6 +313,10 @@ class TurnTelemetry:
         self._transcription_delay_ms: Optional[float] = None
         self._llm_first_token_ms: Optional[float] = None
         self._tts_first_audio_ms: Optional[float] = None
+        # Cost basis per exchange (CLAUDE.md: log cost from day one).
+        self._prompt_tokens: Optional[int] = None
+        self._completion_tokens: Optional[int] = None
+        self._tts_characters: Optional[int] = None
 
     def attach(self) -> None:
         """Wire session event + metrics callbacks (livekit-agents >= 1.5)."""
@@ -328,14 +348,15 @@ class TurnTelemetry:
         if not transcript:
             return
         self._user_text = f"{self._user_text} {transcript}".strip()
-        self._publish_caption("user", transcript)
+        # The is_final event already published the caption above; publishing
+        # again here duplicated the final caption in the browser transcript.
         if self._reply_start_at is None:
             self._reply_start_at = time.monotonic()
         if self._on_final_user is not None:
             try:
                 result = self._on_final_user(transcript)
                 if asyncio.iscoroutine(result):
-                    asyncio.ensure_future(result)
+                    _spawn_task(result)
                 else:
                     logger.info("heuristic_extract captured=%s", result)
             except Exception:
@@ -385,10 +406,10 @@ class TurnTelemetry:
         """Debounced safety flush so turns persist even if the caller hangs
         up before the agent_stopped_speaking event fires."""
         try:
-            loop = asyncio.get_event_loop()
-            loop.call_later(
+            running = asyncio.get_running_loop()
+            running.call_later(
                 delay_s,
-                lambda: loop.create_task(self._safe_flush()),
+                lambda: _spawn_task(self._safe_flush()),
             )
         except Exception:
             logger.debug("Flush scheduling failed", exc_info=True)
@@ -400,7 +421,7 @@ class TurnTelemetry:
             logger.exception("Scheduled flush failed")
 
     def _on_agent_stopped_speaking(self, *_args: Any) -> None:
-        asyncio.ensure_future(self._safe_flush())
+        _spawn_task(self._safe_flush())
 
     # -- metrics handlers ---------------------------------------------------
 
@@ -425,10 +446,27 @@ class TurnTelemetry:
             ttft_seconds = float(getattr(metrics, "ttft", -1.0))
             if ttft_seconds > 0:
                 self._llm_first_token_ms = ttft_seconds * 1000.0
+            # Usage accumulates per metric event within one exchange; the
+            # flush log turns this into a per-turn cost basis.
+            prompt_tokens = getattr(metrics, "prompt_tokens", None)
+            completion_tokens = getattr(metrics, "completion_tokens", None)
+            if prompt_tokens is not None:
+                self._prompt_tokens = (self._prompt_tokens or 0) + int(prompt_tokens)
+            if completion_tokens is not None:
+                self._completion_tokens = (
+                    self._completion_tokens or 0
+                ) + int(completion_tokens)
         elif metric_type == "tts_metrics":
             ttfb_seconds = float(getattr(metrics, "ttfb", 0.0) or 0.0)
             if ttfb_seconds > 0:
                 self._tts_first_audio_ms = ttfb_seconds * 1000.0
+            # livekit-agents 1.7.0 TTSMetrics carries characters_count; older
+            # builds named it characters. Accept either.
+            characters = getattr(metrics, "characters_count", None)
+            if characters is None:
+                characters = getattr(metrics, "characters", None)
+            if characters is not None:
+                self._tts_characters = (self._tts_characters or 0) + int(characters)
 
     # -- flushing ------------------------------------------------------------
 
@@ -461,18 +499,21 @@ class TurnTelemetry:
                 )
 
             rows: list[dict[str, Any]] = []
-            rows.append(
-                {
-                    "turn_index": turn_index,
-                    "speaker": "user",
-                    "text": self._user_text,
-                    "timestamp": timestamp,
-                    "stt_final_ms": self._round(self._stt_final_ms),
-                    "llm_first_token_ms": None,
-                    "tts_first_audio_ms": None,
-                    "e2e_ms": None,
-                }
-            )
+            # A VAD-only exchange (noise/silence) may have no user words at
+            # all - an empty user row would corrupt transcript records.
+            if self._user_text:
+                rows.append(
+                    {
+                        "turn_index": turn_index,
+                        "speaker": "user",
+                        "text": self._user_text,
+                        "timestamp": timestamp,
+                        "stt_final_ms": self._round(self._stt_final_ms),
+                        "llm_first_token_ms": None,
+                        "tts_first_audio_ms": None,
+                        "e2e_ms": None,
+                    }
+                )
             if self._agent_text:
                 rows.append(
                     {
@@ -504,6 +545,9 @@ class TurnTelemetry:
                         "llm_first_token_ms": self._round(self._llm_first_token_ms),
                         "tts_first_audio_ms": self._round(self._tts_first_audio_ms),
                         "e2e_ms": self._round(e2e_ms),
+                        "prompt_tokens": self._prompt_tokens,
+                        "completion_tokens": self._completion_tokens,
+                        "tts_characters": self._tts_characters,
                         "user_chars": len(self._user_text),
                         "agent_chars": len(self._agent_text),
                     },
@@ -591,14 +635,12 @@ async def _wait_for_job_metadata(
     ctx: JobContext, timeout_s: float = 8.0, interval_s: float = 1.0
 ) -> Any:
     """Poll both room and participant metadata until it shows up or times out."""
-    import asyncio
-
-    deadline = asyncio.get_event_loop().time() + timeout_s
+    deadline = asyncio.get_running_loop().time() + timeout_s
     while True:
         raw = _job_metadata(ctx)
         if raw:
             return raw
-        if asyncio.get_event_loop().time() >= deadline:
+        if asyncio.get_running_loop().time() >= deadline:
             return None
         await asyncio.sleep(interval_s)
 
@@ -715,11 +757,8 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
         # Fetch per-call context (institution_name + contact) once at session
         # start; {} on failure is fine — tokens resolve to empty and are dropped.
         call_context = await backend.fetch_call_context(call_id)
-        instructions = render_system_prompt(
-            config,
-            contact=parsed.contact,
-            tokens=build_token_map(contact=parsed.contact, context=call_context),
-        )
+        tokens = build_token_map(contact=parsed.contact, context=call_context)
+        instructions = render_system_prompt(config, contact=parsed.contact, tokens=tokens)
         schema = config.get("extraction_schema") or {}
         coordinator = ExtractionCoordinator(
             required_fields=_required_fields_from_schema(config),
@@ -771,12 +810,7 @@ async def run_session(ctx: JobContext, settings: Settings) -> None:
         await session.start(room=ctx.room, agent=agent)
         # Agent speaks first: the composed opening cannot be barged by
         # background noise, and names are real (token-substituted).
-        await _speak_opening(
-            session,
-            config,
-            build_token_map(contact=parsed.contact, context=call_context),
-            parsed.contact,
-        )
+        await _speak_opening(session, config, tokens, parsed.contact)
     except Exception:
         logger.exception("Unhandled error in voice session (room=%s)", room_name)
         try:

@@ -1,7 +1,10 @@
 """Pure system-prompt rendering for the cascaded voice pipeline.
 
 This module is deliberately free of I/O and third-party imports so it can be
-unit tested offline. The rendered prompt is structured, in order:
+unit tested offline (it imports only the threshold constants from
+``app.extraction_tools``, which are themselves stdlib-only).
+
+The rendered prompt is structured, in order:
 
 1. Mandatory disclosure script — VERBATIM, always the very first utterance.
 2. Role & mission (who the agent is, what this call achieves).
@@ -19,10 +22,9 @@ import logging
 import re
 from typing import Any, Mapping, Optional
 
-logger = logging.getLogger("voice_agent.prompting")
+from app.extraction_tools import LOW_CONFIDENCE_THRESHOLD, MAX_ASKS_PER_FIELD
 
-LOW_CONFIDENCE_THRESHOLD: float = 0.6
-MAX_ASKS_PER_FIELD: int = 3
+logger = logging.getLogger("voice_agent.prompting")
 
 DISCLOSURE_HEADER = (
     "MANDATORY DISCLOSURE - your VERY FIRST utterance, spoken word-for-word:"
@@ -39,18 +41,6 @@ EXTRACTION_HEADER = "RECORDING ANSWERS - extraction discipline:"
 ESCALATION_HEADER = "WHEN TO WRAP UP:"
 
 LANGUAGE_NAMES = {"en": "English", "te": "Telugu", "hi": "Hindi"}
-
-#: Bracket placeholder tokens that may appear verbatim in config strings and
-#: must never be spoken/shipped. Mapped to real values; empty values are removed.
-KNOWN_TOKENS: tuple[str, ...] = (
-    "[Institution Name]",
-    "[Company Name]",
-    "[Student Name]",
-    "[Lead Name]",
-    "[Parent/Guardian Name]",
-    "[Agent Name]",
-    "[Expected Return Date]",
-)
 
 _BRACKET_ARTIFACT_RE = re.compile(r"\[[^\]]*\]")
 _DOUBLE_SPACE_RE = re.compile(r"\s{2,}")
@@ -473,7 +463,17 @@ def render_system_prompt(
         "- BE BRIEF: complete the goals and end the call promptly - every extra minute costs money.\n"
         "- HUMAN HANDOFF: if the caller repeatedly drifts off-topic, demands things beyond "
         "your scope, or needs more help than this call provides, say you will arrange a "
-        "human representative to follow up, then call `end_call` with that summary."
+        "human representative to follow up, then call `end_call` with that summary.\n"
+        "- VERIFY-THEN-CONTINUE: confirming identity is the START of the call, never the "
+        "end. The moment the caller confirms who they are, acknowledge them warmly BY NAME "
+        "and immediately move to the first unfilled goal in the same breath — e.g. 'Great, "
+        "thanks Dhanu! Now, could you share...'. NEVER reply with a bare 'thank you' and "
+        "stop, and NEVER call `end_call` right after verification.\n"
+        "- END ONLY WHEN DONE: call `end_call` only when every REQUIRED goal above is "
+        "covered, the caller explicitly says goodbye / asks you to hang up, or the "
+        "handoff/escalation rules trigger. A vague or partial answer ('yeah', 'you are "
+        "speaking with...') is NOT confirmation and NEVER a reason to end — ask a short "
+        "clarifying question and keep going."
     )
 
     # 5. Goals (question flow) as a checklist, woven naturally.
